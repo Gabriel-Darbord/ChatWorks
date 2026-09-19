@@ -1,10 +1,131 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeAssistantState } from "../src/adapters/chatgpt-bridge.ts";
+import {
+  decodeAccessibilityAssistantObservation,
+  decodeComposerState,
+  decodeGuardedSubmissionResult,
+  decodeAccessibilityMessageParts,
+  normalizeAssistantState,
+} from "../src/adapters/chatgpt-bridge.ts";
 
-test("normalizes assistant-state JSON independently of Swift key order", () => {
-  const first = normalizeAssistantState('{"latestCopyControlY":866,"copyControlCount":1,"responseHeadingCount":4}');
-  const second = normalizeAssistantState('{"responseHeadingCount":4,"copyControlCount":1,"latestCopyControlY":866}');
+test("normalizes assistant-state from structural readiness fields only", () => {
+  const first = normalizeAssistantState(
+    '{"responseHeadingCount":4,"scrollToBottomVisible":false,"copyControlCount":1,"latestCopyControlY":866}',
+  );
+  const second = normalizeAssistantState(
+    '{"latestCopyControlY":null,"copyControlCount":0,"scrollToBottomVisible":false,"responseHeadingCount":4}',
+  );
+
   assert.equal(first, second);
-  assert.equal(first, '{"copyControlCount":1,"latestCopyControlY":866,"responseHeadingCount":4,"scrollToBottomVisible":false}');
+  assert.equal(
+    first,
+    '{"responseHeadingCount":4,"scrollToBottomVisible":false}',
+  );
+});
+
+test("validates accessibility message-parts wire data", () => {
+  assert.deepEqual(
+    decodeAccessibilityMessageParts([
+      { kind: "text", text: "before", language: null, source: null },
+      { kind: "code", text: null, language: "Bash", source: "pwd" },
+    ]),
+    [
+      { kind: "text", text: "before" },
+      { kind: "code", language: "Bash", source: "pwd" },
+    ],
+  );
+
+  assert.throws(
+    () => decodeAccessibilityMessageParts({ kind: "text", text: "no array" }),
+    /not an array/,
+  );
+  assert.throws(
+    () => decodeAccessibilityMessageParts([{ kind: "text" }]),
+    /missing text/,
+  );
+  assert.throws(
+    () => decodeAccessibilityMessageParts([{ kind: "code", language: "bash" }]),
+    /missing source/,
+  );
+  assert.deepEqual(
+    decodeAccessibilityMessageParts([
+      { kind: "code", language: null, source: "pwd" },
+    ]),
+    [{ kind: "code", source: "pwd" }],
+  );
+  assert.throws(
+    () =>
+      decodeAccessibilityMessageParts([
+        { kind: "code", language: 42, source: "pwd" },
+      ]),
+    /invalid language/,
+  );
+  assert.throws(
+    () => decodeAccessibilityMessageParts([{ kind: "other" }]),
+    /unsupported kind/,
+  );
+});
+
+test("decodes an atomic accessibility assistant observation", () => {
+  const observation = decodeAccessibilityAssistantObservation({
+    latestMessageRole: "assistant",
+    parts: [{ kind: "code", language: "bash", source: "pwd" }],
+  });
+
+  assert.deepEqual(observation, {
+    latestMessageRole: "assistant",
+    message: {
+      parts: [{ kind: "block", language: "bash", source: "pwd" }],
+    },
+  });
+
+  assert.throws(
+    () =>
+      decodeAccessibilityAssistantObservation({
+        parts: "not parts",
+      }),
+    /not an array/,
+  );
+
+  assert.throws(
+    () =>
+      decodeAccessibilityAssistantObservation({
+        latestMessageRole: "other",
+        parts: [],
+      }),
+    /invalid latest message role/,
+  );
+});
+
+test("decodes composer state", () => {
+  assert.deepEqual(decodeComposerState({ availability: "available" }), {
+    availability: "available",
+  });
+  assert.deepEqual(decodeComposerState({ availability: "busy" }), {
+    availability: "busy",
+  });
+  assert.deepEqual(decodeComposerState({ availability: "unavailable" }), {
+    availability: "unavailable",
+  });
+  assert.throws(
+    () => decodeComposerState({ availability: "ready" }),
+    /invalid availability/,
+  );
+  assert.throws(() => decodeComposerState(null), /not an object/);
+});
+
+test("decodes guarded submission results", () => {
+  assert.deepEqual(decodeGuardedSubmissionResult({ status: "submitted" }), {
+    status: "submitted",
+  });
+  assert.deepEqual(decodeGuardedSubmissionResult({ status: "busy" }), {
+    status: "busy",
+  });
+  assert.deepEqual(decodeGuardedSubmissionResult({ status: "unavailable" }), {
+    status: "unavailable",
+  });
+  assert.throws(
+    () => decodeGuardedSubmissionResult({ status: "ready" }),
+    /invalid status/,
+  );
 });

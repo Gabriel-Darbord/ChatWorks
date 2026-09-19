@@ -13,15 +13,80 @@ export type Block = {
 export type MessagePart = PlainText | Block;
 
 export type Message = {
-  raw: string;
+  raw?: string;
   parts: MessagePart[];
 };
+
+export type AccessibilityMessagePart = {
+  kind: "text" | "code";
+  text?: string;
+  language?: string;
+  source?: string;
+};
+
+export function messageFromAccessibilityParts(
+  parts: AccessibilityMessagePart[],
+): Message {
+  const messageParts: MessagePart[] = parts.map((part): MessagePart => {
+    if (part.kind === "text") {
+      if (typeof part.text !== "string") {
+        throw new Error("Accessibility text part is missing text.");
+      }
+      return { kind: "plain-text", text: part.text };
+    }
+
+    if (part.kind === "code") {
+      if (typeof part.source !== "string") {
+        throw new Error("Accessibility code part is missing source.");
+      }
+      return {
+        kind: "block",
+        language: part.language?.toLowerCase() ?? "",
+        source: part.source,
+      };
+    }
+
+    throw new Error(
+      `Unsupported accessibility message part: ${JSON.stringify(part)}`,
+    );
+  });
+
+  // AX-backed messages have no canonical Markdown source representation.
+  return { parts: messageParts };
+}
+
+export function messageText(message: Message): string {
+  return message.parts
+    .map((part) => {
+      if (part.kind === "plain-text") return part.text;
+
+      const language = part.language || "text";
+      return `\`\`\`${language}
+${part.source}
+\`\`\``;
+    })
+    .join("\n\n");
+}
+
+export function messageIdentity(message: Message): string {
+  // AX-backed messages have no raw Markdown. Identity is therefore based on
+  // the ordered semantic parts shared by both message constructors.
+  return JSON.stringify(message.parts);
+}
 
 export function parseMessage(markdown: string): Message {
   const parts: MessagePart[] = [];
   const plain: string[] = [];
   const lines = markdown.split(/\r?\n/);
-  let active: { length: number; language: string; metadata?: string; opening: string; source: string[] } | undefined;
+  let active:
+    | {
+        length: number;
+        language: string;
+        metadata?: string;
+        opening: string;
+        source: string[];
+      }
+    | undefined;
 
   const addPlain = (lines: string[]) => {
     if (lines.length === 0) return;
@@ -33,7 +98,9 @@ export function parseMessage(markdown: string): Message {
 
   for (const line of lines) {
     if (!active) {
-      const opening = line.match(/^(`{3,})[ \t]*([^\s`]+)(?:[ \t]+(.*?))?[ \t]*$/);
+      const opening = line.match(
+        /^(`{3,})[ \t]*([^\s`]+)(?:[ \t]+(.*?))?[ \t]*$/,
+      );
       if (!opening) {
         plain.push(line);
         continue;

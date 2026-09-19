@@ -9,10 +9,17 @@ export type ModuleContext = {
 export type MessageModule = {
   name: string;
   handles: (part: MessagePart) => boolean;
-  visit: (part: MessagePart, context: ModuleContext) => Promise<string | undefined>;
+  visit: (
+    part: MessagePart,
+    context: ModuleContext,
+  ) => Promise<string | undefined>;
 };
 
-export async function visitMessage(message: Message, modules: MessageModule[], context: ModuleContext): Promise<string[]> {
+export async function visitMessage(
+  message: Message,
+  modules: MessageModule[],
+  context: ModuleContext,
+): Promise<string[]> {
   const responses: string[] = [];
   for (const part of message.parts) {
     const module = modules.find((candidate) => candidate.handles(part));

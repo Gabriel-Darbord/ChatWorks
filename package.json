@@ -10,10 +10,17 @@
     "start": "npm run bridge:build && node --experimental-strip-types src/cli.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test && npm run bridge:build"
+    "check": "npm run format:check && npm run typecheck && npm test && npm run bridge:build",
+    "format:ts": "prettier --write 'src/**/*.ts' 'test/**/*.ts'",
+    "format:swift": "swift format --in-place --recursive Sources",
+    "format": "npm run format:ts && npm run format:swift",
+    "format:check:ts": "prettier --check 'src/**/*.ts' 'test/**/*.ts'",
+    "format:check:swift": "swift format lint --strict --recursive Sources",
+    "format:check": "npm run format:check:ts && npm run format:check:swift"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",
+    "prettier": "^3.9.8",
     "typescript": "^7.0.2"
   }
 }

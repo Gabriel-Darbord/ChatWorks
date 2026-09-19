@@ -6,28 +6,46 @@ export type ModuleDescriptor = {
   messageModule?: MessageModule;
 };
 
-export function activateModules(descriptors: ModuleDescriptor[], requestedIds?: readonly string[]): ModuleDescriptor[] {
-  const requested = requestedIds ?? descriptors.map((descriptor) => descriptor.id);
+export function activateModules(
+  descriptors: ModuleDescriptor[],
+  requestedIds?: readonly string[],
+): ModuleDescriptor[] {
+  const requested =
+    requestedIds ?? descriptors.map((descriptor) => descriptor.id);
   if (requested.includes("none")) {
-    if (requested.length !== 1) throw new Error("'none' cannot be combined with other module ids.");
+    if (requested.length !== 1)
+      throw new Error("'none' cannot be combined with other module ids.");
     return [];
   }
 
-  const available = new Map(descriptors.map((descriptor) => [descriptor.id, descriptor]));
+  const available = new Map(
+    descriptors.map((descriptor) => [descriptor.id, descriptor]),
+  );
   const active: ModuleDescriptor[] = [];
   for (const id of requested) {
-    if (active.some((descriptor) => descriptor.id === id)) throw new Error(`Module '${id}' was selected more than once.`);
+    if (active.some((descriptor) => descriptor.id === id))
+      throw new Error(`Module '${id}' was selected more than once.`);
     const descriptor = available.get(id);
-    if (!descriptor) throw new Error(`Unknown module '${id}'. Available modules: ${descriptors.map((candidate) => candidate.id).join(", ")}.`);
+    if (!descriptor)
+      throw new Error(
+        `Unknown module '${id}'. Available modules: ${descriptors.map((candidate) => candidate.id).join(", ")}.`,
+      );
     active.push(descriptor);
   }
   for (const descriptor of active) {
-    const conflict = descriptor.incompatibleWith?.find((id) => active.some((candidate) => candidate.id === id));
-    if (conflict) throw new Error(`Modules '${descriptor.id}' and '${conflict}' cannot be active together.`);
+    const conflict = descriptor.incompatibleWith?.find((id) =>
+      active.some((candidate) => candidate.id === id),
+    );
+    if (conflict)
+      throw new Error(
+        `Modules '${descriptor.id}' and '${conflict}' cannot be active together.`,
+      );
   }
   return active;
 }
 
 export function messageModules(active: ModuleDescriptor[]): MessageModule[] {
-  return active.flatMap((descriptor) => descriptor.messageModule ? [descriptor.messageModule] : []);
+  return active.flatMap((descriptor) =>
+    descriptor.messageModule ? [descriptor.messageModule] : [],
+  );
 }

@@ -1,48 +1,147 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatCommandTranscript, formatOutputChunks, formatResult, runShell, shellModule } from "../src/modules/shell.ts";
+import type { Block } from "../src/core/message.ts";
+import {
+  formatCommandPreview,
+  formatOutputChunks,
+  formatResult,
+  runShell,
+  shellModule,
+} from "../src/modules/shell.ts";
 
 test("runs a declared shell block and formats its output", async () => {
-  const block = { kind: "block" as const, language: "sh", source: "printf works" };
+  const block = {
+    kind: "block" as const,
+    language: "sh",
+    source: "printf works",
+  };
   const result = await runShell(block);
   assert.deepEqual(result, { output: "works", exitStatus: 0, timedOut: false });
-  assert.equal(formatResult(block, result), "```text\nprintf works\n[exit status 0]\nworks\n```");
+  assert.equal(
+    formatResult(block, result),
+    "```text\nprintf works\n[exit status 0]\nworks\n```",
+  );
 });
 
 test("stops a shell block at its first failed command", async () => {
-  const result = await runShell({ kind: "block", language: "zsh", source: "false\necho unreachable" });
+  const result = await runShell({
+    kind: "block",
+    language: "zsh",
+    source: "false\necho unreachable",
+  });
   assert.deepEqual(result, { output: "", exitStatus: 1, timedOut: false });
 });
 
 test("uses pipefail for bash and zsh blocks", async () => {
-  const result = await runShell({ kind: "block", language: "bash", source: "false | true\necho unreachable" });
+  const result = await runShell({
+    kind: "block",
+    language: "bash",
+    source: "false | true\necho unreachable",
+  });
   assert.deepEqual(result, { output: "", exitStatus: 1, timedOut: false });
 });
 
-test("shell module handles only configured shell block languages", () => {
+test("shell module requires an explicit source-level ChatWorks directive", () => {
   const module = shellModule();
-  assert.equal(module.handles({ kind: "plain-text", text: "hello" }), false);
-  assert.equal(module.handles({ kind: "block", language: "mcp", source: "{}" }), false);
-  assert.equal(module.handles({ kind: "block", language: "zsh", source: "true" }), true);
-});
 
-test("includes every command line before its result", () => {
-  const block = { kind: "block" as const, language: "sh", source: "pwd\nprintf done" };
-  const result = { output: "/tmp\ndone", exitStatus: 0, timedOut: false };
-  assert.equal(formatResult(block, result), "```text\npwd\nprintf done\n[exit status 0]\n/tmp\ndone\n```");
-});
-
-test("compacts complete heredoc bodies in command transcripts", () => {
-  const source = "cat > src/index.ts <<'EOF'\nexport const answer = 42;\nconsole.log(answer);\nEOF\nnpm run start";
   assert.equal(
-    formatCommandTranscript(source),
-    "cat > src/index.ts <<'EOF'\n[2 lines]\nEOF\nnpm run start",
+    module.handles({
+      kind: "block",
+      language: "bash",
+      source: "pwd",
+    }),
+    false,
+  );
+
+  assert.equal(
+    module.handles({
+      kind: "block",
+      language: "bash",
+      source: "# chatworks:shell\npwd",
+    }),
+    true,
+  );
+
+  assert.equal(
+    module.handles({
+      kind: "block",
+      language: "zsh",
+      source: "# chatworks:shell\npwd",
+    }),
+    true,
+  );
+
+  assert.equal(
+    module.handles({
+      kind: "block",
+      language: "python",
+      source: "# chatworks:shell\nprint(1)",
+    }),
+    false,
+  );
+
+  assert.equal(
+    module.handles({
+      kind: "block",
+      language: "bash",
+      source: "# chatworks:other\npwd",
+    }),
+    false,
+  );
+
+  // Markdown metadata alone is deliberately insufficient because the
+  // production AX representation does not preserve it.
+  assert.equal(
+    module.handles({
+      kind: "block",
+      language: "bash",
+      metadata: "chatworks=shell",
+      source: "pwd",
+    }),
+    false,
   );
 });
 
-test("keeps an incomplete heredoc visible in a command transcript", () => {
-  const source = "cat > src/index.ts <<'EOF'\nexport const answer = 42;";
-  assert.equal(formatCommandTranscript(source), "cat > src/index.ts <<'EOF'\nexport const answer = 42;");
+test("includes a short command in full before its result", () => {
+  const block: Block = {
+    kind: "block",
+    language: "bash",
+    source: "printf first\nprintf second",
+  };
+
+  const rendered = formatResult(block, {
+    output: "first\\nsecond\\n",
+    exitStatus: 0,
+    timedOut: false,
+  });
+
+  assert.ok(rendered.includes("printf first\nprintf second"));
+  assert.match(rendered, /\[exit status 0\]/);
+});
+
+test("truncates long command input while retaining its size", () => {
+  const source = "printf x\\n" + "a".repeat(1_000);
+  const block: Block = {
+    kind: "block",
+    language: "bash",
+    source,
+  };
+
+  const rendered = formatResult(block, {
+    output: "result\\n",
+    exitStatus: 0,
+    timedOut: false,
+  });
+
+  assert.ok(rendered.includes(source.slice(0, 250)));
+  assert.ok(!rendered.includes(source));
+  assert.match(
+    rendered,
+    new RegExp(
+      `\\\\[command truncated; ${source.length} characters total\\\\]`,
+    ),
+  );
+  assert.match(rendered, /result/);
 });
 
 test("preserves observed output order and annotates stderr lines", () => {
@@ -52,5 +151,8 @@ test("preserves observed output order and annotates stderr lines", () => {
     { stream: "stdout", data: Buffer.from("last\n") },
     { stream: "stderr", data: Buffer.from("another problem\n") },
   ]);
-  assert.equal(output, "first\nstderr: problem\nlast\nstderr: another problem\n");
+  assert.equal(
+    output,
+    "first\nstderr: problem\nlast\nstderr: another problem\n",
+  );
 });

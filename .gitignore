@@ -1,3 +1,7 @@
 .build/
 .DS_Store
 node_modules/
+
+.chatworks-probes/
+
+.chatworks-runtime/
