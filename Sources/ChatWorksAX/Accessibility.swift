@@ -10,7 +10,6 @@ public enum AccessibilityError: LocalizedError {
   case writeFailed(String, AXError)
   case copyControlNotFound
   case assistantMessageNotFound
-  case sendControlNotFound
   case sendNotConfirmed
   case stagedDraftCouldNotBeRestored
   case stagedDraftMismatch(expected: String, observed: [String])
@@ -40,8 +39,6 @@ public enum AccessibilityError: LocalizedError {
       return "Could not find a ChatGPT message Copy control."
     case .assistantMessageNotFound:
       return "Could not find a ChatGPT assistant message."
-    case .sendControlNotFound:
-      return "Could not find the ChatGPT Send control."
     case .sendNotConfirmed:
       return "ChatGPT did not confirm that the draft was submitted."
     case .stagedDraftCouldNotBeRestored:
@@ -67,6 +64,21 @@ public enum AccessibilityError: LocalizedError {
     case .clipboardDidNotChange:
       return "ChatGPT did not place copied message contents on the clipboard."
     }
+  }
+}
+
+public struct AnyEncodableValue: Encodable {
+  private let encodeValue: (Encoder) throws -> Void
+
+  public init<T: Encodable>(_ value: T) {
+    encodeValue = { encoder in
+      var container = encoder.singleValueContainer()
+      try container.encode(value)
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    try encodeValue(encoder)
   }
 }
 
@@ -143,9 +155,10 @@ public struct ChatGPTAccessibility {
   let application: AXUIElement
   private let previousFocus: FocusSnapshot
   private static let supportedBundleIdentifiers = ["com.openai.codex", "com.openai.chat"]
-  // Physical clicks remain necessary for some ChatGPT controls. Keep the
-  // restoration mechanism available, but leave the pointer at the control.
-  private static let restoresPointerAfterClick = false
+  // Physical clicks are compatibility fallbacks for controls whose semantic
+  // AX actions are ineffective. Never leave the user's pointer at the
+  // synthetic interaction location.
+  private static let restoresPointerAfterClick = true
 
   public static func connect(
     bundleIdentifier: String? = nil,
@@ -695,6 +708,85 @@ public struct ChatGPTAccessibility {
     }
   }
 
+  public func chatControlAttributeDiagnostics() -> [[String: AnyEncodableValue]] {
+    chatControls().enumerated().map { offset, control in
+      [
+        "index": AnyEncodableValue(offset + 1),
+        "title": AnyEncodableValue(control.title),
+        "titleElement": AnyEncodableValue(attributeDiagnostics(of: control.element)),
+        "actionElement": AnyEncodableValue(
+          control.actionElement.map { attributeDiagnostics(of: $0) } ?? [:]
+        ),
+        "ancestors": AnyEncodableValue(
+          ancestorAttributeDiagnostics(of: control.element)
+        ),
+      ]
+    }
+  }
+
+  private func ancestorAttributeDiagnostics(
+    of element: AXUIElement,
+    limit: Int = 8
+  ) -> [[String: String]] {
+    var result: [[String: String]] = []
+    var current = element
+
+    for _ in 0..<limit {
+      var parentValue: CFTypeRef?
+      guard
+        AXUIElementCopyAttributeValue(
+          current,
+          kAXParentAttribute as CFString,
+          &parentValue
+        ) == .success,
+        let parentValue
+      else {
+        break
+      }
+
+      let parent = parentValue as! AXUIElement
+      result.append(attributeDiagnostics(of: parent))
+      current = parent
+    }
+
+    return result
+  }
+
+  private func attributeDiagnostics(of element: AXUIElement) -> [String: String] {
+    var names: CFArray?
+    guard AXUIElementCopyAttributeNames(element, &names) == .success,
+      let attributes = names as? [String]
+    else {
+      return [:]
+    }
+
+    var result: [String: String] = [:]
+
+    for attribute in attributes {
+      var value: CFTypeRef?
+      guard
+        AXUIElementCopyAttributeValue(
+          element,
+          attribute as CFString,
+          &value
+        ) == .success,
+        let value
+      else {
+        continue
+      }
+
+      if let string = value as? String {
+        result[attribute] = string
+      } else if let number = value as? NSNumber {
+        result[attribute] = number.stringValue
+      } else if CFGetTypeID(value) == AXValueGetTypeID() {
+        result[attribute] = String(describing: value)
+      }
+    }
+
+    return result
+  }
+
   public func selectChat(_ reference: String) throws {
     let controls = chatControls()
     let selected: ChatControl?
@@ -911,11 +1003,69 @@ public struct ChatGPTAccessibility {
     guard let buttonFrame = frame(of: button) else {
       throw AccessibilityError.newChatControlNotFound
     }
+    // AXPress is advertised by this control and returns success, but live
+    // characterization showed that it does not enter ChatGPT's New Chat
+    // interface. Use the physical-click compatibility fallback.
     click(buttonFrame)
     // ChatGPT retains old message controls in its virtualized AX tree, so their
     // presence cannot confirm (or reject) the new-chat transition.
     RunLoop.current.run(until: Date().addingTimeInterval(0.25))
     try activateChatMode()
+  }
+
+  public func submitStagedBySendControl() throws {
+    guard let input = waitsForEditableInput(),
+      let inputFrame = frame(of: input)
+    else {
+      throw AccessibilityError.inputNotFound
+    }
+
+    let inputCenter = CGPoint(x: inputFrame.midX, y: inputFrame.midY)
+
+    let candidates = descendants(of: application)
+      .filter { isSendButton($0) }
+      .compactMap { button -> CGRect? in
+        guard let buttonFrame = frame(of: button) else {
+          return nil
+        }
+
+        let dx = buttonFrame.midX - inputCenter.x
+        let dy = buttonFrame.midY - inputCenter.y
+
+        guard abs(dx) <= inputFrame.width / 2 + 180,
+          abs(dy) <= inputFrame.height / 2 + 120
+        else {
+          return nil
+        }
+
+        return buttonFrame
+      }
+
+    guard candidates.count == 1 else {
+      throw AccessibilityError.sendNotConfirmed
+    }
+
+    // AXPress is advertised by ChatGPT's Send control but live
+    // characterization showed that it does not submit the draft. Reproduce
+    // the effective user interaction with the pointer-restoring click helper.
+    click(candidates[0])
+  }
+
+  public func submitStagedUnconfirmed() throws {
+    guard let input = waitsForEditableInput() else {
+      throw AccessibilityError.inputNotFound
+    }
+
+    let staged = composerSnapshot(of: input)
+
+    guard staged.inputExists,
+      !staged.isEmpty || staged.pastedTextAttachmentPresent
+    else {
+      throw AccessibilityError.sendNotConfirmed
+    }
+
+    try submitStaged(input: input)
+    restoreFocus()
   }
 
   public func send() throws {
@@ -935,14 +1085,36 @@ public struct ChatGPTAccessibility {
     }
 
     let beforeStructure = AccessibilityMessageStructure(application: application)
+    let beforePayloads = beforeStructure.payloads()
+    let beforeLatest = beforeStructure.latestMessagePayload(from: beforePayloads)
 
-    guard let beforeAssistant = beforeStructure.latestAssistantPayload() else {
-      throw AccessibilityError.assistantMessageNotFound
+    let beforeAssistantFingerprint: String?
+    if let beforeLatest {
+      guard beforeStructure.role(of: beforeLatest) == "assistant" else {
+        throw AccessibilityError.sendNotConfirmed
+      }
+      beforeAssistantFingerprint =
+        beforeStructure.semanticFingerprint(of: beforeLatest)
+    } else {
+      beforeAssistantFingerprint = nil
     }
 
-    let beforeAssistantFingerprint =
-      beforeStructure.semanticFingerprint(of: beforeAssistant)
+    try submitStaged(input: input)
 
+    let submitted = waitsForSendSubmission(
+      afterAssistantFingerprint: beforeAssistantFingerprint,
+      staged: staged,
+      input: input
+    )
+
+    restoreFocus()
+
+    guard submitted else {
+      throw AccessibilityError.sendNotConfirmed
+    }
+  }
+
+  private func submitStaged(input: AXUIElement) throws {
     let focusResult = AXUIElementSetAttributeValue(
       input,
       kAXFocusedAttribute as CFString,
@@ -966,18 +1138,6 @@ public struct ChatGPTAccessibility {
       virtualKey: 36,
       keyDown: false
     )?.post(tap: .cghidEventTap)
-
-    let submitted = waitsForSendSubmission(
-      afterAssistantFingerprint: beforeAssistantFingerprint,
-      staged: staged,
-      input: input
-    )
-
-    restoreFocus()
-
-    guard submitted else {
-      throw AccessibilityError.sendNotConfirmed
-    }
   }
 
   private func normalizedComposerText(_ text: String) -> String {
@@ -1021,7 +1181,31 @@ public struct ChatGPTAccessibility {
     guard let chat = waitsForChatModeControl() else {
       throw AccessibilityError.chatModeControlNotFound
     }
-    click(chat.frame)
+
+    let result = AXUIElementPerformAction(
+      chat.element,
+      kAXPressAction as CFString
+    )
+
+    if result == .success {
+      let deadline = Date().addingTimeInterval(0.5)
+      while Date() < deadline {
+        if let current = chatModeControl(),
+          numericAttribute(kAXValueAttribute, of: current.element) == 1
+        {
+          return
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+      }
+    }
+
+    // ChatGPT/Electron may advertise AXPress and even report success without
+    // applying the requested UI transition. Fall back to the characterized
+    // physical interaction, whose pointer position is restored by click().
+    guard let current = chatModeControl() else {
+      throw AccessibilityError.chatModeControlNotFound
+    }
+    click(current.frame)
   }
 
   private func waitsForChatModeControl() -> (element: AXUIElement, frame: CGRect)? {
@@ -1123,7 +1307,7 @@ public struct ChatGPTAccessibility {
   }
 
   private func waitsForSendSubmission(
-    afterAssistantFingerprint assistantFingerprint: String,
+    afterAssistantFingerprint assistantFingerprint: String?,
     staged: ComposerSnapshot,
     input: AXUIElement
   ) -> Bool {
@@ -1154,8 +1338,8 @@ public struct ChatGPTAccessibility {
       // on payload counts or traversal indices remaining stable across
       // independent captures.
       let committedUserTurn =
-        structure.latestUserPayloadFollowingAssistant(
-          fingerprint: assistantFingerprint
+        structure.userPayloadCommittedAfter(
+          assistantFingerprint: assistantFingerprint
         ) != nil
 
       let stagedRepresentationConsumed: Bool
@@ -1163,7 +1347,12 @@ public struct ChatGPTAccessibility {
         stagedRepresentationConsumed =
           !composer.pastedTextAttachmentPresent
       } else {
-        stagedRepresentationConsumed = composer.isEmpty
+        // AXValue may temporarily become unavailable immediately after Enter.
+        // Once the corresponding user turn is structurally committed, either
+        // an empty composer or an unavailable value proves that the staged
+        // text is no longer represented by this input.
+        stagedRepresentationConsumed =
+          composer.text == nil || composer.isEmpty
       }
 
       if committedUserTurn && stagedRepresentationConsumed {
@@ -1177,7 +1366,7 @@ public struct ChatGPTAccessibility {
             + "  rediscovered=\(rediscoveredComposer.diagnosticDescription)\n"
             + "  committedUserTurn=\(committedUserTurn)\n"
             + "  stagedRepresentationConsumed=\(stagedRepresentationConsumed)\n"
-            + "  assistantFingerprintChars=\(assistantFingerprint.count)\n"
+            + "  assistantFingerprintChars=\(assistantFingerprint?.count ?? 0)\n"
             + "  payloadSequence=\(sequence.joined(separator: ","))\n",
           stderr
         )
@@ -1225,19 +1414,6 @@ public struct ChatGPTAccessibility {
       value: value,
       descriptiveLabels: descriptiveLabels
     )
-  }
-
-  private func composerSendButton(near input: AXUIElement) -> AXUIElement? {
-    guard let inputFrame = frame(of: input) else { return nil }
-    let inputCenter = CGPoint(x: inputFrame.midX, y: inputFrame.midY)
-    return descendants(of: application)
-      .filter(isSendButton)
-      .compactMap { button in frame(of: button).map { (button, $0) } }
-      .min { left, right in
-        hypot(left.1.midX - inputCenter.x, left.1.midY - inputCenter.y)
-          < hypot(right.1.midX - inputCenter.x, right.1.midY - inputCenter.y)
-      }?
-      .0
   }
 
   private func assistantCopyButtons() -> [AXUIElement] {
@@ -1376,6 +1552,24 @@ public struct ChatGPTAccessibility {
       RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
     return nil
+  }
+
+  private func numericAttribute(
+    _ attribute: String,
+    of element: AXUIElement
+  ) -> Int? {
+    var value: CFTypeRef?
+    guard
+      AXUIElementCopyAttributeValue(
+        element,
+        attribute as CFString,
+        &value
+      ) == .success,
+      let number = value as? NSNumber
+    else {
+      return nil
+    }
+    return number.intValue
   }
 
   private func stringAttribute(_ attribute: String, of element: AXUIElement) -> String? {

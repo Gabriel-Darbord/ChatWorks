@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseMessage, type Block } from "../src/core/message.ts";
+import { TodoStore } from "../src/core/todos.ts";
 import {
   chatWorksModule,
   type ChatWorksGateway,
@@ -51,7 +55,7 @@ test("sends to a named participant", async () => {
     "select:ChatWorks: reviewer",
     "send:Review this design.",
   ]);
-  assert.equal(result, "Sent message to reviewer.");
+  assert.equal(result, "```text\nSent message to reviewer.\n```");
 });
 
 test("sends to $self without resolving it from the participant repository", async () => {
@@ -86,7 +90,7 @@ test("sends to $self without resolving it from the participant repository", asyn
     "select:ChatWorks: architect",
     "send:Reason about UX.",
   ]);
-  assert.equal(result, "Sent message to $self.");
+  assert.equal(result, "```text\nSent message to $self.\n```");
 });
 
 test("rejects $self outside participant execution", async () => {
@@ -98,13 +102,14 @@ test("rejects $self outside participant execution", async () => {
     async send() {},
   };
 
-  await assert.rejects(
-    () =>
-      chatWorksModule(gateway).visit(
-        block("send $self Reason about UX."),
-        context(),
-      ),
-    /no participant binding/,
+  const result = await chatWorksModule(gateway).visit(
+    block("send $self Reason about UX."),
+    context(),
+  );
+
+  assert.match(
+    result ?? "",
+    /ChatWorks command failed: .*no participant binding/,
   );
 });
 
@@ -121,11 +126,77 @@ test("rejects an unknown named participant before sending", async () => {
     },
   };
 
-  await assert.rejects(
-    () =>
-      chatWorksModule(gateway).visit(block("send missing Hello."), context()),
-    /Could not find participant 'missing'/,
+  const result = await chatWorksModule(gateway).visit(
+    block("send missing Hello."),
+    context(),
   );
 
+  assert.match(
+    result ?? "",
+    /ChatWorks command failed: Could not find participant 'missing'/,
+  );
   assert.equal(sent, false);
+});
+
+test("executes multiple commands in one block", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "chatworks-todos-"));
+  const todos = new TodoStore(directory);
+  const gateway: ChatWorksGateway = {
+    async listChats() {
+      return [];
+    },
+    async selectChat() {},
+    async send() {},
+  };
+
+  const result = await chatWorksModule(gateway, todos).visit(
+    block("todo add First\ntodo add Second"),
+    context(),
+  );
+
+  assert.match(result ?? "", /1\. \[ \] First/);
+  assert.match(result ?? "", /2\. \[ \] Second/);
+});
+
+test("reports one command failure and continues later commands", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "chatworks-todos-"));
+  const todos = new TodoStore(directory);
+  const gateway: ChatWorksGateway = {
+    async listChats() {
+      return [];
+    },
+    async selectChat() {},
+    async send() {},
+  };
+
+  const result = await chatWorksModule(gateway, todos).visit(
+    block("todo done 99\ntodo add Survived"),
+    context(),
+  );
+
+  assert.match(
+    result ?? "",
+    /ChatWorks command failed: Could not find TODO '99'\./,
+  );
+  assert.match(result ?? "", /1\. \[ \] Survived/);
+});
+
+test("reason requests another reasoning turn", async () => {
+  const gateway: ChatWorksGateway = {
+    async listChats() {
+      return [];
+    },
+    async selectChat() {},
+    async send() {},
+  };
+
+  const result = await chatWorksModule(gateway).visit(
+    block("reason"),
+    context(),
+  );
+
+  assert.equal(
+    result,
+    "```text\nContinue reasoning about the current task.\n```",
+  );
 });

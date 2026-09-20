@@ -91,6 +91,26 @@ test("identifies messages from their ordered semantic parts", () => {
   assert.notEqual(messageIdentity(first), messageIdentity(changed));
 });
 
+test("uses a longer transport fence when block source contains a fence", () => {
+  const message = {
+    parts: [
+      {
+        kind: "block" as const,
+        language: "bash",
+        source: "#!chatworks\ncat <<'EOF'\n```text\nhello\n```\nEOF",
+      },
+    ],
+  };
+
+  const rendered = messageText(message);
+
+  assert.equal(
+    rendered,
+    "````bash\n#!chatworks\ncat <<'EOF'\n```text\nhello\n```\nEOF\n````",
+  );
+  assert.deepEqual(parseMessage(rendered).parts, message.parts);
+});
+
 test("renders semantic message parts for textual transport", () => {
   assert.equal(
     messageText({

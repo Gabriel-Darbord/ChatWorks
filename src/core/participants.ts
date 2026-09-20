@@ -1,6 +1,7 @@
 import type { ExecutionScope } from "./execution-scope.ts";
 import {
   chatsAddedSince,
+  createChat,
   type ChatCreationGateway,
   type ChatReference,
   type ListedChat,
@@ -26,6 +27,7 @@ export type ParticipantResolutionGateway = {
 export type ParticipantCreationGateway = ParticipantResolutionGateway &
   ChatCreationGateway &
   ParticipantResponseGateway & {
+    selectChat(reference: string): Promise<void>;
     renameChat(reference: string, newTitle: string): Promise<void>;
   };
 
@@ -156,41 +158,45 @@ export async function createParticipant(
   gateway: ParticipantCreationGateway,
 ): Promise<Participant> {
   const title = participantChatTitle(id);
-  const chats = await gateway.listChats();
+  const before = await gateway.listChats();
 
   if (
-    chats.some(
+    before.some(
       (chat) => chat.title.toLocaleLowerCase() === title.toLocaleLowerCase(),
     )
   ) {
     throw new Error(`A participant chat named '${title}' already exists.`);
   }
 
-  await gateway.newChat();
-  await gateway.stage(participantInitialization(id, role));
-  await gateway.send();
+  const created = await createChat(
+    participantInitialization(id, role),
+    gateway,
+  );
 
+  // First-message submission may leave ChatGPT displaying New Chat rather than
+  // the committed conversation. Select the chat identified by createChat's
+  // sidebar confirmation before observing its initial assistant response.
+  await gateway.selectChat(created.title);
   await waitForParticipantInitialResponse(gateway);
 
-  // ChatGPT may automatically replace its initially generated title while
-  // producing the first response. Resolve the created chat from a fresh
-  // sidebar snapshot only after that response has stabilized.
+  // The generated title may change while the initial response is produced.
+  // Resolve the created conversation again relative to the original sidebar.
   const after = await gateway.listChats();
-  const created = chatsAddedSince(chats, after);
+  const appeared = chatsAddedSince(before, after);
 
-  if (created.length === 0) {
+  if (appeared.length === 0) {
     throw new Error(
       "Could not find the newly created participant chat after its initial response.",
     );
   }
 
-  if (created.length > 1) {
+  if (appeared.length > 1) {
     throw new Error(
       "More than one new ChatGPT chat appeared while creating a participant.",
     );
   }
 
-  const generatedTitle = created[0].title;
+  const generatedTitle = appeared[0].title;
   const duplicateTitles = after.filter(
     (chat) =>
       chat.title.localeCompare(generatedTitle, undefined, {

@@ -11,7 +11,7 @@ export type ChatCreationGateway = {
   listChats(): Promise<ListedChat[]>;
   newChat(): Promise<void>;
   stage(message: string): Promise<void>;
-  send(): Promise<void>;
+  submitStagedUnconfirmed(): Promise<void>;
 };
 
 export type ChatCreationOptions = {
@@ -71,7 +71,7 @@ export async function createChat(
 
   await gateway.newChat();
   await gateway.stage(initialMessage);
-  await gateway.send();
+  await gateway.submitStagedUnconfirmed();
 
   while (Date.now() < deadline) {
     const after = await gateway.listChats();

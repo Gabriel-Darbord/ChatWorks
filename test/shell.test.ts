@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Block } from "../src/core/message.ts";
 import {
   formatCommandPreview,
@@ -318,4 +321,76 @@ test("executes bash commands after installing shell options", async () => {
     signal: null,
     timedOut: false,
   });
+});
+
+test("shell commands use the ChatWorks working directory", async () => {
+  const previous = process.cwd();
+  const directory = await mkdtemp(join(tmpdir(), "chatworks-shell-cwd-"));
+
+  try {
+    process.chdir(directory);
+
+    const result = await runShell({
+      kind: "block",
+      language: "bash",
+      source: "pwd",
+    });
+
+    assert.equal(result.exitStatus, 0);
+    assert.equal(result.output.trim(), await realpath(directory));
+  } finally {
+    process.chdir(previous);
+  }
+});
+
+test("silent shell blocks execute but return no response", async () => {
+  const output: string[] = [];
+  const module = shellModule();
+
+  const result = await module.visit(
+    {
+      kind: "block",
+      language: "sh",
+      source: "#!chatworks silent\nprintf silent-ran",
+    },
+    {
+      scope: {},
+      onBlockStart() {},
+      onBlockFinish() {},
+      onOutput(chunk) {
+        output.push(chunk.toString("utf8"));
+      },
+    },
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(output.join(""), "silent-ran");
+});
+
+test("skip shell blocks do not execute", async () => {
+  const module = shellModule();
+  let started = false;
+  let output = "";
+
+  const result = await module.visit(
+    {
+      kind: "block",
+      language: "sh",
+      source: "#!chatworks skip\nprintf should-not-run",
+    },
+    {
+      scope: {},
+      onBlockStart() {
+        started = true;
+      },
+      onBlockFinish() {},
+      onOutput(chunk) {
+        output += chunk.toString("utf8");
+      },
+    },
+  );
+
+  assert.equal(result, undefined);
+  assert.equal(started, false);
+  assert.equal(output, "");
 });

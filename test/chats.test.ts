@@ -66,7 +66,7 @@ test("creates, initializes, and binds a new chat by its generated title", async 
       operations.push(`stage:${message}`);
     },
 
-    async send() {
+    async submitStagedUnconfirmed() {
       operations.push("send");
     },
   };
@@ -106,7 +106,7 @@ test("rejects ambiguous simultaneous chat creation", async () => {
 
     async newChat() {},
     async stage() {},
-    async send() {},
+    async submitStagedUnconfirmed() {},
   };
 
   await assert.rejects(

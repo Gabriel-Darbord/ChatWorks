@@ -59,131 +59,41 @@ public struct AccessibilityMessageSiblingSnapshot: Encodable {
   public let containsRenderedText: Bool
 }
 
+struct AccessibilityMessageElementSnapshot {
+  let traversalIndex: Int
+  let role: String?
+  let title: String?
+  let description: String?
+  let value: String?
+  let parentTraversalIndex: Int?
+  let childTraversalIndices: [Int]
+  let containsRenderedText: Bool
+}
+
+public struct AccessibilityConversationElementSnapshot: Encodable {
+  public let traversalIndex: Int
+  public let role: String?
+  public let title: String?
+  public let description: String?
+  public let value: String?
+  public let parentTraversalIndex: Int?
+  public let childTraversalIndices: [Int]
+  public let containsRenderedText: Bool
+}
+
+public struct AccessibilityConversationSnapshot: Encodable {
+  public let payloads: [AccessibilityPayloadCandidate]
+  public let latestPayload: AccessibilityLatestPayloadSelection?
+  public let latestAssistantSiblings: [AccessibilityMessageSiblingSnapshot]
+  public let latestAssistantTree: [AccessibilityConversationElementSnapshot]
+}
+
 /// Read-only diagnostics for adapting ChatWorks to ChatGPT accessibility changes.
 public struct ChatGPTAccessibilityInspector {
   private let application: AXUIElement
 
   init(application: AXUIElement) {
     self.application = application
-  }
-
-  public func elementsNear(
-    labels: [String],
-    padding: CGFloat = 80,
-    limit: Int = 5_000
-  ) -> [AccessibilityComposerElementSnapshot] {
-    let elements = descendants(of: application, limit: limit)
-
-    let anchors = elements.compactMap { element -> AccessibilityFrame? in
-      let values = [
-        stringAttribute(kAXTitleAttribute, of: element),
-        stringAttribute(kAXDescriptionAttribute, of: element),
-        stringAttribute(kAXValueAttribute, of: element),
-      ].compactMap { $0 }
-
-      guard
-        labels.contains(where: { label in
-          values.contains {
-            $0.caseInsensitiveCompare(label) == .orderedSame
-          }
-        })
-      else {
-        return nil
-      }
-
-      return frame(of: element)
-    }
-
-    guard !anchors.isEmpty else { return [] }
-
-    return elements.enumerated().compactMap { index, element in
-      guard let candidate = frame(of: element) else { return nil }
-
-      let isNear = anchors.contains { anchor in
-        let region = CGRect(
-          x: anchor.x - padding,
-          y: anchor.y - padding,
-          width: anchor.width + 2 * padding,
-          height: anchor.height + 2 * padding
-        )
-        let candidateRect = CGRect(
-          x: candidate.x,
-          y: candidate.y,
-          width: candidate.width,
-          height: candidate.height
-        )
-        return region.intersects(candidateRect)
-      }
-
-      guard isNear else { return nil }
-
-      return AccessibilityComposerElementSnapshot(
-        traversalIndex: index,
-        role: stringAttribute(kAXRoleAttribute, of: element),
-        title: stringAttribute(kAXTitleAttribute, of: element),
-        description: stringAttribute(kAXDescriptionAttribute, of: element),
-        value: stringAttribute(kAXValueAttribute, of: element),
-        frame: candidate,
-        actions: actionNames(of: element),
-        enabled: booleanAttribute(kAXEnabledAttribute, of: element),
-        focused: booleanAttribute(kAXFocusedAttribute, of: element),
-        settableValue: isAttributeSettable(kAXValueAttribute, of: element)
-      )
-    }
-  }
-
-  public func editableAndSelectedElements(
-    limit: Int = 5_000
-  ) -> [[String: String]] {
-    descendants(of: application, limit: limit)
-      .enumerated()
-      .compactMap { index, element in
-        let role = stringAttribute(kAXRoleAttribute, of: element)
-        let value = stringAttribute(kAXValueAttribute, of: element)
-        let selectedText = stringAttribute(
-          kAXSelectedTextAttribute,
-          of: element
-        )
-        let valueSettable =
-          isAttributeSettable(kAXValueAttribute, of: element) == true
-        let selectedTextSettable =
-          isAttributeSettable(kAXSelectedTextAttribute, of: element) == true
-
-        var selectedRangeValue: CFTypeRef?
-        let hasSelectedRange =
-          AXUIElementCopyAttributeValue(
-            element,
-            kAXSelectedTextRangeAttribute as CFString,
-            &selectedRangeValue
-          ) == .success
-
-        guard
-          valueSettable
-            || selectedTextSettable
-            || selectedText != nil
-            || hasSelectedRange
-        else {
-          return nil
-        }
-
-        var result = [
-          "index": String(index),
-          "role": role ?? "",
-          "value": value ?? "",
-          "selectedText": selectedText ?? "",
-          "valueSettable": String(valueSettable),
-          "selectedTextSettable": String(selectedTextSettable),
-          "hasSelectedTextRange": String(hasSelectedRange),
-          "actions": actionNames(of: element).joined(separator: ","),
-        ]
-
-        if let frame = frame(of: element) {
-          result["frame"] =
-            "\(frame.x),\(frame.y),\(frame.width),\(frame.height)"
-        }
-
-        return result
-      }
   }
 
   public func controls(matching labels: [String] = [], limit: Int = 5_000)
@@ -312,94 +222,69 @@ public struct ChatGPTAccessibilityInspector {
     )
   }
 
-  public func latestAssistantPayloadSelection(
+  public func conversationSnapshot(
     limit: Int = 5_000
-  ) -> AccessibilityLatestPayloadSelection? {
-    guard
-      let selection = AccessibilityMessageStructure(
-        application: application,
-        limit: limit
-      ).latestAssistantPayload()
-    else {
-      return nil
+  ) -> AccessibilityConversationSnapshot {
+    let structure = AccessibilityMessageStructure(
+      application: application,
+      limit: limit
+    )
+    let payloads = structure.payloads()
+
+    let candidates = payloads.map {
+      AccessibilityPayloadCandidate(
+        anchorLabel: $0.anchorLabel,
+        anchorTraversalIndex: $0.anchorTraversalIndex,
+        rootTraversalIndices: $0.rootTraversalIndices
+      )
     }
 
-    return AccessibilityLatestPayloadSelection(
-      anchorLabel: selection.metadata.anchorLabel,
-      anchorTraversalIndex: selection.metadata.anchorTraversalIndex,
-      rootTraversalIndices: selection.metadata.rootTraversalIndices,
-      rootCount: selection.roots.count
-    )
-  }
+    let latest = structure.latestAssistantPayload(from: payloads)
 
-  public func latestAssistantSiblingSequence(
-    limit: Int = 5_000
-  ) -> [AccessibilityMessageSiblingSnapshot] {
-    AccessibilityMessageStructure(application: application, limit: limit)
-      .latestAssistantSiblingSequence()
-      .map {
-        AccessibilityMessageSiblingSnapshot(
+    let latestSelection = latest.map {
+      AccessibilityLatestPayloadSelection(
+        anchorLabel: $0.metadata.anchorLabel,
+        anchorTraversalIndex: $0.metadata.anchorTraversalIndex,
+        rootTraversalIndices: $0.metadata.rootTraversalIndices,
+        rootCount: $0.roots.count
+      )
+    }
+
+    let siblings = structure.latestAssistantSiblingSequence().map {
+      AccessibilityMessageSiblingSnapshot(
+        traversalIndex: $0.traversalIndex,
+        role: $0.role,
+        title: $0.title,
+        description: $0.description,
+        value: $0.value,
+        containsRenderedText: $0.containsRenderedText
+      )
+    }
+
+    let tree =
+      latest.map {
+        structure.subtreeSnapshots(
+          rootedAt: $0.metadata.rootTraversalIndices
+        )
+      } ?? []
+
+    return AccessibilityConversationSnapshot(
+      payloads: candidates,
+      latestPayload: latestSelection,
+      latestAssistantSiblings: siblings,
+      latestAssistantTree: tree.map {
+        AccessibilityConversationElementSnapshot(
           traversalIndex: $0.traversalIndex,
           role: $0.role,
           title: $0.title,
           description: $0.description,
           value: $0.value,
+          parentTraversalIndex: $0.parentTraversalIndex,
+          childTraversalIndices: $0.childTraversalIndices,
           containsRenderedText: $0.containsRenderedText
         )
       }
-  }
-
-  public func payloadCandidates(limit: Int = 5_000) -> [AccessibilityPayloadCandidate] {
-    AccessibilityMessageStructure(application: application, limit: limit)
-      .payloads()
-      .map {
-        AccessibilityPayloadCandidate(
-          anchorLabel: $0.anchorLabel,
-          anchorTraversalIndex: $0.anchorTraversalIndex,
-          rootTraversalIndices: $0.rootTraversalIndices
-        )
-      }
-  }
-
-  public func latestPayloadTree(limit: Int = 5_000) -> [AccessibilityControlSnapshot] {
-    let structure = AccessibilityMessageStructure(
-      application: application,
-      limit: limit
     )
-    guard let payload = structure.latestAssistantPayload() else {
-      return []
-    }
-
-    var result: [AccessibilityControlSnapshot] = []
-    var traversalIndex = 0
-
-    func append(_ element: AXUIElement) {
-      result.append(
-        snapshot(of: element, traversalIndex: traversalIndex)
-      )
-      traversalIndex += 1
-
-      var children: CFTypeRef?
-      guard
-        AXUIElementCopyAttributeValue(
-          element,
-          kAXChildrenAttribute as CFString,
-          &children
-        ) == .success,
-        let children = children as? [AXUIElement]
-      else {
-        return
-      }
-
-      for child in children {
-        append(child)
-      }
-    }
-
-    for root in payload.roots {
-      append(root)
-    }
-    return result
   }
 
   private func descendants(of root: AXUIElement, limit: Int) -> [AXUIElement] {

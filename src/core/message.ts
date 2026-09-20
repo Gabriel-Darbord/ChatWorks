@@ -61,9 +61,16 @@ export function messageText(message: Message): string {
       if (part.kind === "plain-text") return part.text;
 
       const language = part.language || "text";
-      return `\`\`\`${language}
+      const longestFence = part.source
+        .split(/\r?\n/)
+        .reduce((longest, line) => {
+          const match = line.match(/^(`{3,})/);
+          return Math.max(longest, match?.[1].length ?? 0);
+        }, 0);
+      const fence = "`".repeat(Math.max(3, longestFence + 1));
+      return `${fence}${language}
 ${part.source}
-\`\`\``;
+${fence}`;
     })
     .join("\n\n");
 }

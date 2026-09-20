@@ -3,16 +3,12 @@ import Foundation
 
 struct UsageError: LocalizedError {
   var errorDescription: String? {
-    "Usage: chatworks-ax read | chatworks-ax message-parts | chatworks-ax assistant-observation | chatworks-ax assistant-state | chatworks-ax composer-state | chatworks-ax scroll-to-bottom | chatworks-ax stage | chatworks-ax stage-and-send | chatworks-ax guarded-stage-and-send | chatworks-ax send | chatworks-ax list-chats | chatworks-ax select-chat <reference> | chatworks-ax new-chat | chatworks-ax rename-chat <reference> <new-title> | chatworks-ax inspect [label...] | chatworks-ax inspect-composer | chatworks-ax inspect-elements <label...> | chatworks-ax inspect-latest-siblings | chatworks-ax inspect-payload-candidates | chatworks-ax inspect-latest-payload-tree | chatworks-ax inspect-latest-payload"
+    "Usage: chatworks-ax read | chatworks-ax message-parts | chatworks-ax assistant-observation | chatworks-ax assistant-state | chatworks-ax composer-state | chatworks-ax scroll-to-bottom | chatworks-ax stage | chatworks-ax stage-and-send | chatworks-ax guarded-stage-and-send | chatworks-ax send | chatworks-ax list-chats | chatworks-ax select-chat <reference> | chatworks-ax new-chat | chatworks-ax rename-chat <reference> <new-title> | chatworks-ax inspect [label...] | chatworks-ax inspect-composer | chatworks-ax inspect-conversation | chatworks-ax inspect-chat-attributes | chatworks-ax inspect-elements <label...>"
   }
 }
 
 @main
 struct ChatWorksBridge {
-  // Keep restoration available while interaction behavior is refined, but leave
-  // ChatGPT active after bridge calls for now.
-  private static let restoresFocus = false
-
   static func main() {
     do {
       let arguments = Array(CommandLine.arguments.dropFirst())
@@ -21,6 +17,7 @@ struct ChatWorksBridge {
         "stage-and-send",
         "guarded-stage-and-send",
         "send",
+        "submit-staged-by-send-control",
         "select-chat",
         "new-chat",
         "rename-chat",
@@ -29,10 +26,6 @@ struct ChatWorksBridge {
         arguments.first.map { activatingCommands.contains($0) } ?? false
 
       let chat = try ChatGPTAccessibility.connect(activate: activatesChatGPT)
-      defer {
-        if restoresFocus { chat.restoreFocus() }
-      }
-
       switch arguments {
       case ["read"]:
         FileHandle.standardOutput.write(Data(try chat.latestAssistantRawText().utf8))
@@ -68,6 +61,12 @@ struct ChatWorksBridge {
         )
       case ["send"]:
         try chat.send()
+
+      case ["submit-staged-by-send-control"]:
+        try chat.submitStagedBySendControl()
+
+      case ["submit-staged-unconfirmed"]:
+        try chat.submitStagedUnconfirmed()
       case ["list-chats"]:
         let data = try JSONEncoder().encode(chat.chatReferences())
         FileHandle.standardOutput.write(data)
@@ -85,6 +84,14 @@ struct ChatWorksBridge {
         FileHandle.standardOutput.write(
           try JSONEncoder().encode(chat.inspector().composerSnapshot())
         )
+      case ["inspect-conversation"]:
+        FileHandle.standardOutput.write(
+          try JSONEncoder().encode(chat.inspector().conversationSnapshot())
+        )
+      case ["inspect-chat-attributes"]:
+        FileHandle.standardOutput.write(
+          try JSONEncoder().encode(chat.chatControlAttributeDiagnostics())
+        )
       case let arguments where arguments.first == "inspect":
         let data = try JSONEncoder().encode(
           chat.inspector().controls(matching: Array(arguments.dropFirst())))
@@ -92,20 +99,6 @@ struct ChatWorksBridge {
       case let arguments where arguments.first == "inspect-elements":
         let data = try JSONEncoder().encode(
           chat.inspector().elements(matching: Array(arguments.dropFirst())))
-        FileHandle.standardOutput.write(data)
-      case ["inspect-latest-siblings"]:
-        let data = try JSONEncoder().encode(
-          chat.inspector().latestAssistantSiblingSequence()
-        )
-        FileHandle.standardOutput.write(data)
-      case ["inspect-payload-candidates"]:
-        let data = try JSONEncoder().encode(chat.inspector().payloadCandidates())
-        FileHandle.standardOutput.write(data)
-      case ["inspect-latest-payload-tree"]:
-        let data = try JSONEncoder().encode(chat.inspector().latestPayloadTree())
-        FileHandle.standardOutput.write(data)
-      case ["inspect-latest-payload"]:
-        let data = try JSONEncoder().encode(chat.inspector().latestAssistantPayloadSelection())
         FileHandle.standardOutput.write(data)
       default:
         throw UsageError()

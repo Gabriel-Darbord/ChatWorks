@@ -106,6 +106,46 @@ struct AccessibilityMessageStructure {
     )
   }
 
+  func elementSnapshot(
+    at traversalIndex: Int
+  ) -> AccessibilityMessageElementSnapshot? {
+    guard let element = byIndex[traversalIndex] else {
+      return nil
+    }
+
+    return AccessibilityMessageElementSnapshot(
+      traversalIndex: element.traversalIndex,
+      role: element.role,
+      title: element.title,
+      description: element.description,
+      value: element.value,
+      parentTraversalIndex: element.parentTraversalIndex,
+      childTraversalIndices: element.childTraversalIndices,
+      containsRenderedText: containsRenderedText(traversalIndex)
+    )
+  }
+
+  func subtreeSnapshots(
+    rootedAt rootTraversalIndices: [Int]
+  ) -> [AccessibilityMessageElementSnapshot] {
+    var result: [AccessibilityMessageElementSnapshot] = []
+    var pending = rootTraversalIndices.reversed().map { $0 }
+    var visited = Set<Int>()
+
+    while let index = pending.popLast() {
+      guard visited.insert(index).inserted,
+        let snapshot = elementSnapshot(at: index)
+      else {
+        continue
+      }
+
+      result.append(snapshot)
+      pending.append(contentsOf: snapshot.childTraversalIndices.reversed())
+    }
+
+    return result
+  }
+
   func payloads() -> [AccessibilityMessagePayload] {
     let anchors = elements.filter {
       $0.role == kAXHeadingRole
@@ -218,29 +258,44 @@ struct AccessibilityMessageStructure {
     }
   }
 
-  func latestUserPayloadFollowingAssistant(
-    fingerprint assistantFingerprint: String
+  func userPayloadCommittedAfter(
+    assistantFingerprint: String?
   ) -> AccessibilitySelectedPayload? {
     let payloads = payloads()
 
-    guard payloads.count >= 2,
-      let latestMetadata = payloads.last,
-      latestMetadata.anchorLabel == "You said:",
-      let latestIndex = payloads.indices.last
+    if let assistantFingerprint {
+      guard payloads.count >= 2 else { return nil }
+
+      for predecessorIndex in payloads.indices.dropLast().reversed() {
+        let predecessorMetadata = payloads[predecessorIndex]
+
+        guard predecessorMetadata.anchorLabel == "ChatGPT said:",
+          let predecessor = selectedPayload(from: predecessorMetadata),
+          semanticFingerprint(of: predecessor) == assistantFingerprint
+        else {
+          continue
+        }
+
+        let userMetadata = payloads[payloads.index(after: predecessorIndex)]
+        guard userMetadata.anchorLabel == "You said:" else { return nil }
+
+        return selectedPayload(from: userMetadata)
+      }
+
+      return nil
+    }
+
+    // No payload existed before submission. The committed user turn must
+    // therefore be the first payload; a fast assistant response may already
+    // follow it by the time this capture is observed.
+    guard
+      let firstMetadata = payloads.first,
+      firstMetadata.anchorLabel == "You said:"
     else {
       return nil
     }
 
-    let predecessorMetadata = payloads[payloads.index(before: latestIndex)]
-
-    guard predecessorMetadata.anchorLabel == "ChatGPT said:",
-      let predecessor = selectedPayload(from: predecessorMetadata),
-      semanticFingerprint(of: predecessor) == assistantFingerprint
-    else {
-      return nil
-    }
-
-    return selectedPayload(from: latestMetadata)
+    return selectedPayload(from: firstMetadata)
   }
 
   func latestAssistantSiblingSequence() -> [AccessibilityMessageSibling] {

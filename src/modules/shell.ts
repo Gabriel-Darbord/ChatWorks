@@ -47,6 +47,7 @@ export async function runShell(
     `/bin/${block.language}`,
     ["-c", `${prelude}\n${block.source}`],
     {
+      cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
       env: executionEnvironment(),
       detached: true,
@@ -206,10 +207,16 @@ export function shellModule(): MessageModule {
         source: directive.source,
       };
 
+      if (directive.mode === "skip") {
+        return undefined;
+      }
+
       context.onBlockStart(executable);
       try {
         const result = await runShell(executable, context.onOutput);
-        return formatResult(executable, result);
+        return directive.mode === "silent"
+          ? undefined
+          : formatResult(executable, result);
       } finally {
         context.onBlockFinish(executable);
       }

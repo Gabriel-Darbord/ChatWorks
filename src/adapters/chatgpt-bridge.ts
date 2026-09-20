@@ -210,8 +210,8 @@ export function participantCreationGateway(): ParticipantCreationGateway {
       await callBridge(["stage"], message);
     },
 
-    async send() {
-      await callBridge(["send"]);
+    async submitStagedUnconfirmed() {
+      await callBridge(["submit-staged-unconfirmed"]);
     },
 
     async observeAssistant() {
@@ -220,6 +220,10 @@ export function participantCreationGateway(): ParticipantCreationGateway {
 
     async composerAvailable() {
       return (await readComposerState()).availability === "available";
+    },
+
+    async selectChat(reference) {
+      await callBridge(["select-chat", reference]);
     },
 
     async renameChat(reference, newTitle) {

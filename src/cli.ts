@@ -47,6 +47,9 @@ import {
   type WatchState,
 } from "./core/watch.ts";
 import { runOnce } from "./core/once.ts";
+import { withTurnCheckpoint } from "./core/checkpoint.ts";
+import { formatTodos, TodoStore } from "./core/todos.ts";
+import { messageRequestsAbort } from "./core/chatworks-language.ts";
 
 const pollMilliseconds = 1_000;
 const usage = `Usage:
@@ -103,7 +106,15 @@ async function runMessage(
   modules: MessageModule[],
   scope: ExecutionScope = {},
 ): Promise<string> {
+  if (messageRequestsAbort(message)) {
+    return "Aborted.";
+  }
+
   let blockNumber = 0;
+  const handled = message.parts.some((part) =>
+    modules.some((module) => module.handles(part)),
+  );
+
   const responses = await visitMessage(message, modules, {
     scope,
     onBlockStart(block: Block) {
@@ -117,11 +128,20 @@ async function runMessage(
       (stream === "stdout" ? process.stdout : process.stderr).write(chunk);
     },
   });
-  if (responses.length === 0) {
-    console.log("No configured module handled a message part.");
-    return "";
+  if (responses.length > 0) {
+    return responses.join("\n\n");
   }
-  return responses.join("\n\n");
+
+  if (!handled) {
+    console.log("No configured module handled a message part.");
+
+    const todos = await new TodoStore().list();
+    if (todos.length > 0) {
+      return formatTodos(todos);
+    }
+  }
+
+  return "";
 }
 
 function printReadResult(raw: string, modules: MessageModule[]): void {
@@ -180,11 +200,11 @@ async function watchIteration(
   try {
     await runWatchIteration(
       watchGateway(waiting),
-      {
+      withTurnCheckpoint({
         execute(message) {
           return runMessage(message, modules);
         },
-      },
+      }),
       state,
       transactions,
     );
@@ -308,11 +328,11 @@ async function once(
 
   const result = await runOnce(
     observation,
-    {
+    withTurnCheckpoint({
       execute(message) {
         return runMessage(message, modules, scope);
       },
-    },
+    }),
     {
       async submit(response) {
         return (await guardedStageAndSend(response)).status;
@@ -514,6 +534,12 @@ async function runParticipantCommand(arguments_: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const [command, ...rawArguments] = process.argv.slice(2);
+
+  if (command === "--help" || command === "-h") {
+    console.log(usage);
+    return;
+  }
+
   const { arguments_, moduleIds, participantId } =
     extractGlobalOptions(rawArguments);
   const active = activateModules(availableModules, moduleIds);

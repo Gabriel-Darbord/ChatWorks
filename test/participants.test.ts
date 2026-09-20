@@ -224,6 +224,7 @@ test("participant roster rejects duplicate logical ids", async () => {
 
 test("creates and deterministically names a role-backed participant after its initial response", async () => {
   const operations: string[] = [];
+  let submitted = false;
   let responseObservations = 0;
 
   const participant = await createParticipant(
@@ -234,6 +235,10 @@ test("creates and deterministically names a role-backed participant after its in
     {
       async listChats() {
         operations.push("list");
+
+        if (!submitted) {
+          return [{ index: 1, title: "Creator" }];
+        }
 
         if (responseObservations >= 2) {
           return [
@@ -256,8 +261,13 @@ test("creates and deterministically names a role-backed participant after its in
         operations.push(`stage:${message}`);
       },
 
-      async send() {
-        operations.push("send");
+      async submitStagedUnconfirmed() {
+        submitted = true;
+        operations.push("submit");
+      },
+
+      async selectChat(reference) {
+        operations.push(`select:${reference}`);
       },
 
       async observeAssistant() {
@@ -286,18 +296,28 @@ test("creates and deterministically names a role-backed participant after its in
     chat: { title: "ChatWorks: reviewer" },
   });
 
-  assert.equal(operations[0], "list");
   assert.ok(operations.includes("new"));
   assert.ok(
     operations.some((operation) =>
       operation.startsWith("stage:[ChatWorks participant]"),
     ),
   );
-  assert.ok(operations.includes("send"));
+  assert.ok(operations.includes("submit"));
+  assert.ok(operations.includes("select:Generated participant title"));
   assert.ok(responseObservations >= 2);
-  assert.equal(
-    operations.at(-1),
-    "rename:Acknowledge participant ID->ChatWorks: reviewer",
+  assert.ok(
+    operations.includes(
+      "rename:Acknowledge participant ID->ChatWorks: reviewer",
+    ),
+  );
+
+  assert.ok(
+    operations.indexOf("submit") <
+      operations.indexOf("select:Generated participant title"),
+  );
+  assert.ok(
+    operations.indexOf("select:Generated participant title") <
+      operations.indexOf("observe:1"),
   );
 });
 
@@ -321,7 +341,7 @@ test("rejects an existing deterministic participant title before creating a chat
 
           async stage() {},
 
-          async send() {},
+          async submitStagedUnconfirmed() {},
 
           async observeAssistant() {
             throw new Error("unexpected assistant observation");
@@ -329,6 +349,10 @@ test("rejects an existing deterministic participant title before creating a chat
 
           async composerAvailable() {
             throw new Error("unexpected composer observation");
+          },
+
+          async selectChat() {
+            throw new Error("unexpected chat selection");
           },
 
           async renameChat() {
