@@ -2,12 +2,19 @@ import { spawn } from "node:child_process";
 import type { Block, MessagePart } from "../core/message.ts";
 import type { MessageModule } from "../core/modules.ts";
 import { executionEnvironment } from "../core/execution-context.ts";
-import { hasShellDirective } from "../core/directives.ts";
+import { chatWorksDirective } from "../core/directives.ts";
 
 export type CommandResult = {
   output: string;
-  exitStatus: number;
+  exitStatus: number | null;
+  signal: NodeJS.Signals | null;
   timedOut: boolean;
+};
+
+export type ShellExecutionOptions = {
+  timeoutMilliseconds?: number;
+  terminationGraceMilliseconds?: number;
+  outputLimit?: number;
 };
 
 export type OutputChunk = {
@@ -15,26 +22,41 @@ export type OutputChunk = {
   data: Buffer;
 };
 
-const outputLimit = 64 * 1024;
-const timeoutMilliseconds = 30_000;
+const defaultOutputLimit = 64 * 1024;
+const defaultTimeoutMilliseconds = 30_000;
+const defaultTerminationGraceMilliseconds = 1_000;
 
 export async function runShell(
   block: Block,
   onOutput?: (chunk: Buffer, stream: "stdout" | "stderr") => void,
+  options: ShellExecutionOptions = {},
 ): Promise<CommandResult> {
+  const outputLimit = options.outputLimit ?? defaultOutputLimit;
+  const timeoutMilliseconds =
+    options.timeoutMilliseconds ?? defaultTimeoutMilliseconds;
+  const terminationGraceMilliseconds =
+    options.terminationGraceMilliseconds ?? defaultTerminationGraceMilliseconds;
+
   const prelude =
     block.language === "sh" ? "set -e" : "set -e\nset -o pipefail";
+
+  // A detached POSIX child becomes the leader of a new process group. This
+  // lets timeout handling terminate the complete script process tree rather
+  // than only the shell process.
   const child = spawn(
     `/bin/${block.language}`,
     ["-c", `${prelude}\n${block.source}`],
     {
       stdio: ["ignore", "pipe", "pipe"],
       env: executionEnvironment(),
+      detached: true,
     },
   );
+
   const output: OutputChunk[] = [];
   let outputBytes = 0;
   let truncated = false;
+
   const capture = (chunk: Buffer, stream: OutputChunk["stream"]) => {
     const remaining = outputLimit - outputBytes;
     if (remaining > 0) {
@@ -43,30 +65,73 @@ export async function runShell(
     }
     truncated ||= chunk.length > remaining;
   };
+
   child.stdout.on("data", (chunk: Buffer) => {
     capture(chunk, "stdout");
     onOutput?.(chunk, "stdout");
   });
+
   child.stderr.on("data", (chunk: Buffer) => {
     capture(chunk, "stderr");
     onOutput?.(chunk, "stderr");
   });
 
   let timedOut = false;
+  let escalation: NodeJS.Timeout | undefined;
+
+  const signalProcessGroup = (signal: NodeJS.Signals) => {
+    if (child.pid === undefined) return;
+
+    try {
+      process.kill(-child.pid, signal);
+    } catch (error) {
+      // ESRCH means the process group disappeared between our observation and
+      // the signal. That is already the state we wanted.
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ESRCH"
+      ) {
+        throw error;
+      }
+    }
+  };
+
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill("SIGTERM");
+    signalProcessGroup("SIGTERM");
+
+    escalation = setTimeout(() => {
+      signalProcessGroup("SIGKILL");
+    }, terminationGraceMilliseconds);
   }, timeoutMilliseconds);
 
-  const exitStatus = await new Promise<number>((resolve, reject) => {
+  const termination = await new Promise<{
+    exitStatus: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
-  }).finally(() => clearTimeout(timeout));
+    child.once("close", (code, signal) => {
+      resolve({
+        exitStatus: code,
+        signal,
+      });
+    });
+  }).finally(() => {
+    clearTimeout(timeout);
+    if (escalation !== undefined) clearTimeout(escalation);
+  });
 
   const suffix = truncated
     ? `\n[output truncated at ${outputLimit} bytes]`
     : "";
-  return { output: formatOutputChunks(output) + suffix, exitStatus, timedOut };
+
+  return {
+    output: formatOutputChunks(output) + suffix,
+    exitStatus: termination.exitStatus,
+    signal: termination.signal,
+    timedOut,
+  };
 }
 
 export function formatOutputChunks(chunks: OutputChunk[]): string {
@@ -108,26 +173,46 @@ export function formatCommandPreview(source: string): string {
 
 export function formatResult(block: Block, result: CommandResult): string {
   const status = result.timedOut
-    ? "timed out"
-    : `exit status ${result.exitStatus}`;
+    ? result.signal
+      ? `timed out; terminated by ${result.signal}`
+      : "timed out"
+    : result.signal
+      ? `terminated by ${result.signal}`
+      : `exit status ${result.exitStatus}`;
   const command = formatCommandPreview(block.source);
-  return `\`\`\`text\n${command}\n[${status}]\n${result.output}\n\`\`\``;
+  const output = result.output.endsWith("\n")
+    ? result.output
+    : result.output + "\n";
+  return `\`\`\`text\n${command}\n[${status}]\n${output}\`\`\``;
 }
 
 export function shellModule(): MessageModule {
   const handlesShell = (part: MessagePart): part is Block =>
     part.kind === "block" &&
     ["sh", "bash", "zsh"].includes(part.language) &&
-    hasShellDirective(part.source);
+    chatWorksDirective(part.source) !== undefined;
+
   return {
     name: "shell",
     handles: handlesShell,
     async visit(part, context) {
       if (!handlesShell(part)) return undefined;
-      context.onBlockStart(part);
-      const result = await runShell(part, context.onOutput);
-      context.onBlockFinish(part);
-      return formatResult(part, result);
+
+      const directive = chatWorksDirective(part.source);
+      if (!directive) return undefined;
+
+      const executable: Block = {
+        ...part,
+        source: directive.source,
+      };
+
+      context.onBlockStart(executable);
+      try {
+        const result = await runShell(executable, context.onOutput);
+        return formatResult(executable, result);
+      } finally {
+        context.onBlockFinish(executable);
+      }
     },
   };
 }

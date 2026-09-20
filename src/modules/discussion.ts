@@ -1,13 +1,6 @@
-export type ChatReference = { index: number; title: string };
-
-export type DiscussionParticipant = {
-  id: string;
-  name: string;
-  index: number;
-};
+import type { Participant } from "../core/participants.ts";
 
 export type DiscussionGateway = {
-  listChats: () => Promise<ChatReference[]>;
   selectChat: (reference: string) => Promise<void>;
   assistantState: () => Promise<string>;
   scrollToBottom?: () => Promise<void>;
@@ -24,7 +17,7 @@ export type DiscussionOptions = {
 };
 
 type DiscussionMessage = {
-  sender: DiscussionParticipant;
+  sender: Participant;
   text: string;
   seenBy: Set<string>;
 };
@@ -44,58 +37,10 @@ function needsScrollToBottom(state: string): boolean {
   }
 }
 
-export async function resolveParticipants(
-  references: string[],
-  gateway: DiscussionGateway,
-): Promise<DiscussionParticipant[]> {
-  if (references.length < 2)
-    throw new Error("discuss requires at least two chat references.");
-  const chats = await gateway.listChats();
-  const participants = references.map((reference) => {
-    const index = Number(reference);
-    const matches =
-      Number.isInteger(index) && index >= 1
-        ? chats.filter((candidate) => candidate.index === index)
-        : chats.filter(
-            (candidate) =>
-              candidate.title.toLocaleLowerCase() ===
-              reference.toLocaleLowerCase(),
-          );
-    if (matches.length === 0)
-      throw new Error(`Could not find a chat matching '${reference}'.`);
-    if (matches.length > 1)
-      throw new Error(
-        `More than one chat is named '${reference}'; use its displayed index.`,
-      );
-    const chat = matches[0];
-    return {
-      id: `participant-${chat.index}`,
-      name: chat.title,
-      index: chat.index,
-    };
-  });
-  if (
-    new Set(participants.map((participant) => participant.index)).size !==
-    participants.length
-  ) {
-    throw new Error("A discussion participant may appear only once.");
-  }
-  if (
-    new Set(
-      participants.map((participant) => participant.name.toLocaleLowerCase()),
-    ).size !== participants.length
-  ) {
-    throw new Error(
-      "Discussion participants must have unique chat titles so ChatWorks can follow sidebar reordering.",
-    );
-  }
-  return participants;
-}
-
 function promptFor(
-  recipient: DiscussionParticipant,
-  next: DiscussionParticipant,
-  participants: DiscussionParticipant[],
+  recipient: Participant,
+  next: Participant,
+  participants: Participant[],
   messages: DiscussionMessage[],
 ): string {
   const roster = participants.map((participant) => participant.id).join(", ");
@@ -165,19 +110,22 @@ async function waitForReply(
 }
 
 export async function discuss(
-  participants: DiscussionParticipant[],
+  participants: Participant[],
   gateway: DiscussionGateway,
   options: DiscussionOptions,
 ): Promise<void> {
+  if (participants.length < 2) {
+    throw new Error("A discussion requires at least two participants.");
+  }
   if (!Number.isInteger(options.passes) || options.passes < 1)
     throw new Error("passes must be a positive integer.");
   const first = participants[0];
-  await gateway.selectChat(first.name);
+  await gateway.selectChat(first.chat.title);
   let sender = first;
   const opening = await gateway.latestAssistantMessage();
   if (!opening)
     throw new Error(
-      `'${first.name}' has no assistant message to start the discussion.`,
+      `'${first.chat.title}' has no assistant message to start the discussion.`,
     );
   const transcript: DiscussionMessage[] = [
     { sender: first, text: opening, seenBy: new Set([first.id]) },
@@ -189,7 +137,7 @@ export async function discuss(
     options.onProgress?.(
       `Pass ${pass + 1}/${options.passes}: ${sender.id} → ${recipient.id}`,
     );
-    await gateway.selectChat(recipient.name);
+    await gateway.selectChat(recipient.chat.title);
     const previousState = await gateway.assistantState();
     const unread = transcript.filter(
       (message) => !message.seenBy.has(recipient.id),

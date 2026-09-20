@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  discuss,
-  resolveParticipants,
-  type DiscussionGateway,
-} from "../src/modules/discussion.ts";
+import { discuss, type DiscussionGateway } from "../src/modules/discussion.ts";
+
+function participantsFor(...titles: string[]) {
+  return titles.map((title, index) => ({
+    id: `participant-${index + 1}`,
+    chat: { title },
+  }));
+}
 
 test("routes a discussion in round-robin order with participant provenance", async () => {
   const selected: string[] = [];
@@ -17,13 +20,6 @@ test("routes a discussion in round-robin order with participant provenance", asy
   let current = "";
   let revision = 0;
   const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-        { index: 3, title: "Three" },
-      ];
-    },
     async selectChat(reference) {
       current = reference;
       selected.push(reference);
@@ -40,7 +36,7 @@ test("routes a discussion in round-robin order with participant provenance", asy
       messages.set(current, `${current} reply ${sent.length}`);
     },
   };
-  const participants = await resolveParticipants(["1", "2", "3"], gateway);
+  const participants = participantsFor("One", "Two", "Three");
   await discuss(participants, gateway, { passes: 3, pollMilliseconds: 0 });
 
   assert.deepEqual(selected, ["One", "Two", "Three", "One"]);
@@ -60,66 +56,10 @@ test("routes a discussion in round-robin order with participant provenance", asy
   assert.doesNotMatch(sent[2], /participant-1 wrote:\nopening/);
 });
 
-test("requires unique participant titles to survive sidebar reordering", async () => {
-  const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "Duplicate" },
-        { index: 2, title: "Duplicate" },
-      ];
-    },
-    async selectChat() {},
-    async assistantState() {
-      return "state";
-    },
-    async latestAssistantMessage() {
-      return undefined;
-    },
-    async send() {},
-  };
-  await assert.rejects(
-    () => resolveParticipants(["1", "2"], gateway),
-    /unique chat titles/,
-  );
-});
-
-test("resolves discussion participants by exact chat title like switch", async () => {
-  const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-      ];
-    },
-    async selectChat() {},
-    async assistantState() {
-      return "state";
-    },
-    async latestAssistantMessage() {
-      return undefined;
-    },
-    async send() {},
-  };
-  const participants = await resolveParticipants(["one", "2"], gateway);
-  assert.deepEqual(
-    participants.map(({ id, name }) => ({ id, name })),
-    [
-      { id: "participant-1", name: "One" },
-      { id: "participant-2", name: "Two" },
-    ],
-  );
-});
-
 test("a one-pass discussion sends without reading the recipient", async () => {
   let state = "before";
   let reads = 0;
   const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-      ];
-    },
     async selectChat() {},
     async assistantState() {
       return state;
@@ -132,7 +72,7 @@ test("a one-pass discussion sends without reading the recipient", async () => {
       state = "after";
     },
   };
-  const participants = await resolveParticipants(["1", "2"], gateway);
+  const participants = participantsFor("One", "Two");
   await discuss(participants, gateway, { passes: 1, pollMilliseconds: 0 });
   assert.equal(reads, 1);
 });
@@ -143,13 +83,6 @@ test("waits for a new stable structured recipient reply instead of forwarding it
   let revision = 0;
   const replies = ["opening", "new reply", "new reply"];
   const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-        { index: 3, title: "Three" },
-      ];
-    },
     async selectChat(reference) {
       current = reference;
     },
@@ -164,7 +97,7 @@ test("waits for a new stable structured recipient reply instead of forwarding it
       revision += 1;
     },
   };
-  const participants = await resolveParticipants(["1", "2", "3"], gateway);
+  const participants = participantsFor("One", "Two", "Three");
   await discuss(participants, gateway, { passes: 2, pollMilliseconds: 0 });
 
   assert.match(sent[1], /participant-2 wrote:\nnew reply/);
@@ -176,13 +109,6 @@ test("keeps observing after assistant state returns to its pre-send value", asyn
   let stateReads = 0;
   const replies = ["opening", "new reply", "new reply"];
   const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-        { index: 3, title: "Three" },
-      ];
-    },
     async selectChat() {},
     async assistantState() {
       return (
@@ -196,7 +122,7 @@ test("keeps observing after assistant state returns to its pre-send value", asyn
       sent.push(message);
     },
   };
-  const participants = await resolveParticipants(["1", "2", "3"], gateway);
+  const participants = participantsFor("One", "Two", "Three");
   await discuss(participants, gateway, { passes: 2, pollMilliseconds: 0 });
 
   assert.match(sent[1], /participant-2 wrote:\nnew reply/);
@@ -207,13 +133,6 @@ test("retries when a structured reply temporarily disappears", async () => {
   let stateReads = 0;
   const replies = ["opening", undefined, "new reply", "new reply"];
   const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-        { index: 3, title: "Three" },
-      ];
-    },
     async selectChat() {},
     async assistantState() {
       return stateReads++ === 0 ? "before" : "changed";
@@ -225,7 +144,7 @@ test("retries when a structured reply temporarily disappears", async () => {
       sent.push(message);
     },
   };
-  const participants = await resolveParticipants(["1", "2", "3"], gateway);
+  const participants = participantsFor("One", "Two", "Three");
   await discuss(participants, gateway, { passes: 2, pollMilliseconds: 0 });
 
   assert.match(sent[1], /participant-2 wrote:\nnew reply/);
@@ -238,13 +157,6 @@ test("requests at most one scroll while waiting for a participant response", asy
   const ready = JSON.stringify({ scrollToBottomVisible: true });
   const replies = ["opening", "new reply", "new reply"];
   const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-        { index: 3, title: "Three" },
-      ];
-    },
     async selectChat() {},
     async assistantState() {
       return [before, ready, ready, ready][stateReads++] ?? ready;
@@ -257,7 +169,7 @@ test("requests at most one scroll while waiting for a participant response", asy
     },
     async send() {},
   };
-  const participants = await resolveParticipants(["1", "2", "3"], gateway);
+  const participants = participantsFor("One", "Two", "Three");
   await discuss(participants, gateway, { passes: 2, pollMilliseconds: 0 });
 
   assert.equal(scrolls, 1);
@@ -267,13 +179,6 @@ test("stops after a bounded number of unstable structured reply observations", a
   let stateReads = 0;
   let replyNumber = 0;
   const gateway: DiscussionGateway = {
-    async listChats() {
-      return [
-        { index: 1, title: "One" },
-        { index: 2, title: "Two" },
-        { index: 3, title: "Three" },
-      ];
-    },
     async selectChat() {},
     async assistantState() {
       return stateReads++ === 0 ? "before" : "changed";
@@ -284,7 +189,7 @@ test("stops after a bounded number of unstable structured reply observations", a
     },
     async send() {},
   };
-  const participants = await resolveParticipants(["1", "2", "3"], gateway);
+  const participants = participantsFor("One", "Two", "Three");
   await assert.rejects(
     () =>
       discuss(participants, gateway, {
@@ -293,5 +198,27 @@ test("stops after a bounded number of unstable structured reply observations", a
         maxReplyObservations: 3,
       }),
     /Stopped waiting after 3 unstable reply observations/,
+  );
+});
+
+test("requires at least two resolved participants", async () => {
+  const gateway: DiscussionGateway = {
+    async selectChat() {},
+    async assistantState() {
+      return "state";
+    },
+    async latestAssistantMessage() {
+      return "opening";
+    },
+    async send() {},
+  };
+
+  await assert.rejects(
+    () =>
+      discuss(participantsFor("One"), gateway, {
+        passes: 1,
+        pollMilliseconds: 0,
+      }),
+    /at least two participants/,
   );
 });

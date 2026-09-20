@@ -150,17 +150,34 @@ struct AccessibilityMessageStructure {
     latestAssistantPayload(from: payloads())
   }
 
-  func latestMessageRole() -> String? {
+  func latestMessagePayload(
+    from payloads: [AccessibilityMessagePayload]
+  ) -> AccessibilitySelectedPayload? {
     guard
-      let anchor = elements.last(where: {
-        $0.role == kAXHeadingRole
-          && ["You said:", "ChatGPT said:"].contains($0.title ?? "")
+      let metadata = payloads.max(by: {
+        $0.anchorTraversalIndex < $1.anchorTraversalIndex
       })
     else {
       return nil
     }
 
-    switch anchor.title {
+    let roots = metadata.rootTraversalIndices.compactMap { index in
+      accessibilityElements.indices.contains(index)
+        ? accessibilityElements[index]
+        : nil
+    }
+    guard roots.count == metadata.rootTraversalIndices.count else {
+      return nil
+    }
+
+    return AccessibilitySelectedPayload(
+      metadata: metadata,
+      roots: roots
+    )
+  }
+
+  func role(of payload: AccessibilitySelectedPayload) -> String? {
+    switch payload.metadata.anchorLabel {
     case "You said:":
       return "user"
     case "ChatGPT said:":
@@ -168,6 +185,62 @@ struct AccessibilityMessageStructure {
     default:
       return nil
     }
+  }
+
+  func semanticFingerprint(
+    of payload: AccessibilitySelectedPayload
+  ) -> String {
+    var components = [payload.metadata.anchorLabel]
+
+    for rootIndex in payload.metadata.rootTraversalIndices {
+      appendSemanticComponents(
+        from: rootIndex,
+        into: &components
+      )
+    }
+
+    return components.joined(separator: "\u{1f}")
+  }
+
+  func diagnosticPayloadSequence() -> [String] {
+    payloads().compactMap { metadata in
+      guard let payload = selectedPayload(from: metadata) else {
+        return nil
+      }
+
+      let fingerprint = semanticFingerprint(of: payload)
+      let hash = fingerprint.utf8.reduce(UInt64(14_695_981_039_346_656_037)) {
+        value, byte in
+        (value ^ UInt64(byte)) &* 1_099_511_628_211
+      }
+
+      return "\(role(of: payload) ?? "unknown"):" + String(format: "%016llx", hash)
+    }
+  }
+
+  func latestUserPayloadFollowingAssistant(
+    fingerprint assistantFingerprint: String
+  ) -> AccessibilitySelectedPayload? {
+    let payloads = payloads()
+
+    guard payloads.count >= 2,
+      let latestMetadata = payloads.last,
+      latestMetadata.anchorLabel == "You said:",
+      let latestIndex = payloads.indices.last
+    else {
+      return nil
+    }
+
+    let predecessorMetadata = payloads[payloads.index(before: latestIndex)]
+
+    guard predecessorMetadata.anchorLabel == "ChatGPT said:",
+      let predecessor = selectedPayload(from: predecessorMetadata),
+      semanticFingerprint(of: predecessor) == assistantFingerprint
+    else {
+      return nil
+    }
+
+    return selectedPayload(from: latestMetadata)
   }
 
   func latestAssistantSiblingSequence() -> [AccessibilityMessageSibling] {
@@ -223,6 +296,48 @@ struct AccessibilityMessageStructure {
       metadata: metadata,
       roots: roots
     )
+  }
+
+  private func selectedPayload(
+    from metadata: AccessibilityMessagePayload
+  ) -> AccessibilitySelectedPayload? {
+    let roots = metadata.rootTraversalIndices.compactMap { index in
+      accessibilityElements.indices.contains(index)
+        ? accessibilityElements[index]
+        : nil
+    }
+
+    guard roots.count == metadata.rootTraversalIndices.count else {
+      return nil
+    }
+
+    return AccessibilitySelectedPayload(
+      metadata: metadata,
+      roots: roots
+    )
+  }
+
+  private func appendSemanticComponents(
+    from rootIndex: Int,
+    into components: inout [String]
+  ) {
+    var pending = [rootIndex]
+    var visited = Set<Int>()
+
+    while let index = pending.popLast() {
+      guard visited.insert(index).inserted,
+        let element = byIndex[index]
+      else {
+        continue
+      }
+
+      components.append(element.role ?? "")
+      components.append(element.title ?? "")
+      components.append(element.description ?? "")
+      components.append(element.value ?? "")
+
+      pending.append(contentsOf: element.childTraversalIndices.reversed())
+    }
   }
 
   private func containsRenderedText(_ rootIndex: Int) -> Bool {

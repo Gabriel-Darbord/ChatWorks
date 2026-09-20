@@ -8,7 +8,7 @@
   "scripts": {
     "bridge:build": "swift build --product chatworks-ax",
     "start": "npm run bridge:build && node --experimental-strip-types src/cli.ts",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "npm run test:ts && npm run test:swift",
     "typecheck": "tsc --noEmit",
     "check": "npm run format:check && npm run typecheck && npm test && npm run bridge:build",
     "format:ts": "prettier --write 'src/**/*.ts' 'test/**/*.ts'",
@@ -16,7 +16,9 @@
     "format": "npm run format:ts && npm run format:swift",
     "format:check:ts": "prettier --check 'src/**/*.ts' 'test/**/*.ts'",
     "format:check:swift": "swift format lint --strict --recursive Sources",
-    "format:check": "npm run format:check:ts && npm run format:check:swift"
+    "format:check": "npm run format:check:ts && npm run format:check:swift",
+    "test:ts": "node --experimental-strip-types --test test/*.test.ts",
+    "test:swift": "swift test"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",

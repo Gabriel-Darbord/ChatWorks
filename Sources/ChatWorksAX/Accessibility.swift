@@ -7,15 +7,19 @@ public enum AccessibilityError: LocalizedError {
   case inputNotFound
   case composerBusy
   case composerUnavailable
-  case writeFailed(AXError)
+  case writeFailed(String, AXError)
   case copyControlNotFound
   case assistantMessageNotFound
   case sendControlNotFound
   case sendNotConfirmed
+  case stagedDraftCouldNotBeRestored
+  case stagedDraftMismatch(expected: String, observed: [String])
   case newChatControlNotFound
   case chatModeControlNotFound
   case chatNotFound(String)
   case ambiguousChatName(String)
+  case renameControlNotFound
+  case renameNotConfirmed(String)
   case clipboardDidNotChange
 
   public var errorDescription: String? {
@@ -30,8 +34,8 @@ public enum AccessibilityError: LocalizedError {
       return "ChatGPT composer is busy."
     case .composerUnavailable:
       return "ChatGPT composer is temporarily unavailable."
-    case .writeFailed(let error):
-      return "Could not write to ChatGPT: \(error.rawValue)."
+    case .writeFailed(let operation, let error):
+      return "Could not \(operation): \(error.rawValue)."
     case .copyControlNotFound:
       return "Could not find a ChatGPT message Copy control."
     case .assistantMessageNotFound:
@@ -40,6 +44,14 @@ public enum AccessibilityError: LocalizedError {
       return "Could not find the ChatGPT Send control."
     case .sendNotConfirmed:
       return "ChatGPT did not confirm that the draft was submitted."
+    case .stagedDraftCouldNotBeRestored:
+      return
+        "ChatWorks staged a draft but could not safely restore the composer after submission failed."
+    case .stagedDraftMismatch(let expected, let observed):
+      let expectedDescription = String(reflecting: expected)
+      let observedDescription = observed.map(String.init(reflecting:)).joined(separator: ", ")
+      return
+        "ChatGPT normalized the staged draft; expected \(expectedDescription); observed [\(observedDescription)]."
     case .newChatControlNotFound:
       return "Could not find ChatGPT's New chat control."
     case .chatModeControlNotFound:
@@ -48,6 +60,10 @@ public enum AccessibilityError: LocalizedError {
       return "Could not find a ChatGPT chat matching '\(reference)'."
     case .ambiguousChatName(let name):
       return "More than one ChatGPT chat is named '\(name)'; use its displayed index."
+    case .renameControlNotFound:
+      return "Could not find ChatGPT's Rename or Save control."
+    case .renameNotConfirmed(let title):
+      return "ChatGPT did not confirm the renamed chat '\(title)'."
     case .clipboardDidNotChange:
       return "ChatGPT did not place copied message contents on the clipboard."
     }
@@ -89,6 +105,40 @@ public struct AccessibilityAssistantObservation: Encodable {
   public let parts: [AccessibilityMessagePart]
 }
 
+private struct ComposerSnapshot: Equatable {
+  let inputExists: Bool
+  let text: String?
+  let isEmpty: Bool
+  let sendPresent: Bool
+  let stopPresent: Bool
+  let pastedTextAttachmentPresent: Bool
+
+  var diagnosticDescription: String {
+    let textDescription: String
+    if let text {
+      textDescription = "textChars=\(text.count)"
+    } else {
+      textDescription = "text=nil"
+    }
+
+    return [
+      "input=\(inputExists)",
+      textDescription,
+      "empty=\(isEmpty)",
+      "send=\(sendPresent)",
+      "stop=\(stopPresent)",
+      "attachment=\(pastedTextAttachmentPresent)",
+    ].joined(separator: " ")
+  }
+}
+
+private enum StageAssessment {
+  case processing
+  case acceptedAsExactText
+  case acceptedAsTransformedText
+  case acceptedAsAttachment
+}
+
 public struct ChatGPTAccessibility {
   let application: AXUIElement
   private let previousFocus: FocusSnapshot
@@ -97,7 +147,10 @@ public struct ChatGPTAccessibility {
   // restoration mechanism available, but leave the pointer at the control.
   private static let restoresPointerAfterClick = false
 
-  public static func connect(bundleIdentifier: String? = nil) throws -> Self {
+  public static func connect(
+    bundleIdentifier: String? = nil,
+    activate: Bool = false
+  ) throws -> Self {
     guard AXIsProcessTrusted() else { throw AccessibilityError.accessibilityPermissionMissing }
     let previousFocus = FocusSnapshot.capture()
     let identifiers = bundleIdentifier.map { [$0] } ?? supportedBundleIdentifiers
@@ -105,10 +158,15 @@ public struct ChatGPTAccessibility {
       identifiers.contains($0.bundleIdentifier ?? "") || $0.localizedName == "ChatGPT"
     }
     guard let running else { throw AccessibilityError.chatGPTNotRunning }
-    running.activate(options: [])
+
+    if activate {
+      running.activate(options: [])
+    }
+
     return Self(
       application: AXUIElementCreateApplication(running.processIdentifier),
-      previousFocus: previousFocus)
+      previousFocus: previousFocus
+    )
   }
 
   public func restoreFocus() {
@@ -122,13 +180,20 @@ public struct ChatGPTAccessibility {
   public func latestAssistantObservation() throws -> AccessibilityAssistantObservation {
     let structure = AccessibilityMessageStructure(application: application)
     let payloads = structure.payloads()
-    guard let payload = structure.latestAssistantPayload(from: payloads) else {
+
+    guard let latest = structure.latestMessagePayload(from: payloads) else {
       throw AccessibilityError.assistantMessageNotFound
     }
 
+    let role = structure.role(of: latest)
+    let parts =
+      role == "assistant"
+      ? AccessibilityMessagePartReader().read(latest)
+      : []
+
     return AccessibilityAssistantObservation(
-      latestMessageRole: structure.latestMessageRole(),
-      parts: AccessibilityMessagePartReader().read(payload)
+      latestMessageRole: role,
+      parts: parts
     )
   }
 
@@ -173,68 +238,420 @@ public struct ChatGPTAccessibility {
   }
 
   public func composerState() -> ComposerState {
-    let elements = descendants(of: application)
+    let snapshot = composerSnapshot()
 
-    guard let input = elements.last(where: isEditableInput),
-      let inputFrame = frame(of: input)
-    else {
+    guard snapshot.inputExists else {
       return ComposerState(availability: .unavailable)
     }
 
-    let inputCenter = CGPoint(x: inputFrame.midX, y: inputFrame.midY)
-    let nearbyButtons =
-      elements
-      .filter {
-        stringAttribute(kAXRoleAttribute, of: $0) == kAXButtonRole
-      }
-      .compactMap { button in
-        frame(of: button).map { (button, $0) }
-      }
-      .filter { _, buttonFrame in
-        let dx = buttonFrame.midX - inputCenter.x
-        let dy = buttonFrame.midY - inputCenter.y
-        return abs(dx) <= inputFrame.width / 2 + 180
-          && abs(dy) <= inputFrame.height / 2 + 120
-      }
-
-    // AXEnabled is not a reliable readiness signal for ChatGPT's web
-    // composer. Live captures expose both idle Send and transitional Stop
-    // as disabled. The action occupying the composer slot is the stable
-    // semantic signal instead.
-    if nearbyButtons.contains(where: { button, _ in
-      isButton(button, containing: "stop")
-    }) {
+    // Stop takes precedence during transient captures that expose controls
+    // from both composer states.
+    if snapshot.stopPresent {
       return ComposerState(availability: .busy)
     }
 
-    if nearbyButtons.contains(where: { button, _ in
-      isSendButton(button)
-    }) {
+    if snapshot.sendPresent {
       return ComposerState(availability: .available)
     }
 
     return ComposerState(availability: .unavailable)
   }
 
-  public func stage(_ text: String) throws {
-    let deadline = Date().addingTimeInterval(2)
-    var lastWriteError: AXError?
+  private func typeDraft(_ text: String) throws -> [NSPasteboardItem] {
+    guard let input = waitsForEditableInput() else {
+      throw AccessibilityError.inputNotFound
+    }
+
+    let focusResult = AXUIElementSetAttributeValue(
+      input,
+      kAXFocusedAttribute as CFString,
+      kCFBooleanTrue
+    )
+    guard focusResult == .success else {
+      throw AccessibilityError.writeFailed("focus ChatGPT composer", focusResult)
+    }
+
+    let pasteboard = NSPasteboard.general
+    let previousItems =
+      pasteboard.pasteboardItems?.compactMap { item -> NSPasteboardItem? in
+        let copy = NSPasteboardItem()
+        var copied = false
+        for type in item.types {
+          if let data = item.data(forType: type) {
+            copy.setData(data, forType: type)
+            copied = true
+          }
+        }
+        return copied ? copy : nil
+      } ?? []
+
+    pasteboard.clearContents()
+    pasteboard.setString(text, forType: .string)
+
+    let keySource = CGEventSource(stateID: .hidSystemState)
+    let keyDown = CGEvent(
+      keyboardEventSource: keySource,
+      virtualKey: 9,
+      keyDown: true
+    )
+    let keyUp = CGEvent(
+      keyboardEventSource: keySource,
+      virtualKey: 9,
+      keyDown: false
+    )
+    keyDown?.flags = .maskCommand
+    keyUp?.flags = .maskCommand
+    keyDown?.post(tap: .cghidEventTap)
+    keyUp?.post(tap: .cghidEventTap)
+
+    return previousItems
+  }
+
+  private func restorePasteboard(_ previousItems: [NSPasteboardItem]) {
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    if !previousItems.isEmpty {
+      pasteboard.writeObjects(previousItems)
+    }
+  }
+
+  private func clearComposerContents() throws {
+    guard let input = waitsForEditableInput() else {
+      throw AccessibilityError.inputNotFound
+    }
+
+    let result = AXUIElementSetAttributeValue(
+      input,
+      kAXValueAttribute as CFString,
+      "" as CFTypeRef
+    )
+    guard result == .success else {
+      throw AccessibilityError.writeFailed(
+        "clear ChatGPT composer",
+        result
+      )
+    }
+
+    // AX assignment and ChatGPT's web editor are asynchronous. Do not treat
+    // successful AX mutation as a confirmed empty editor; observe the
+    // resulting semantic state instead.
+    let deadline = Date().addingTimeInterval(3)
+
     while Date() < deadline {
-      if let input = editableInput() {
-        let result = AXUIElementSetAttributeValue(
-          input, kAXValueAttribute as CFString, text as CFTypeRef)
-        if result == .success { return }
-        lastWriteError = result
+      let snapshot = composerSnapshot()
+
+      if snapshot.inputExists,
+        snapshot.isEmpty,
+        !snapshot.pastedTextAttachmentPresent
+      {
+        return
       }
+
       RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
-    if let lastWriteError { throw AccessibilityError.writeFailed(lastWriteError) }
-    throw AccessibilityError.inputNotFound
+
+    throw AccessibilityError.writeFailed(
+      "confirm empty ChatGPT composer",
+      .failure
+    )
+  }
+
+  private func composerPastedTextAttachments(
+    near input: AXUIElement,
+    elements: [AXUIElement]? = nil
+  ) -> [AXUIElement] {
+    guard let inputFrame = frame(of: input) else {
+      return []
+    }
+
+    return (elements ?? descendants(of: application)).filter { element in
+      guard stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole,
+        let elementFrame = frame(of: element)
+      else {
+        return false
+      }
+
+      let labels = controlLabels(of: element)
+      guard
+        labels.contains(where: {
+          $0.caseInsensitiveCompare("Pasted text.txt") == .orderedSame
+        })
+      else {
+        return false
+      }
+
+      // Composer attachments occupy the local region immediately above the
+      // editable input. Historical message attachments elsewhere in the
+      // virtualized AX tree must not satisfy staging.
+      return elementFrame.maxX >= inputFrame.minX
+        && elementFrame.minX <= inputFrame.maxX
+        && elementFrame.maxY >= inputFrame.minY - 160
+        && elementFrame.minY <= inputFrame.maxY
+    }
+  }
+
+  private func composerSnapshot() -> ComposerSnapshot {
+    let elements = descendants(of: application)
+
+    guard let input = elements.last(where: isEditableInput) else {
+      return ComposerSnapshot(
+        inputExists: false,
+        text: nil,
+        isEmpty: false,
+        sendPresent: false,
+        stopPresent: false,
+        pastedTextAttachmentPresent: false
+      )
+    }
+
+    return composerSnapshot(of: input, elements: elements)
+  }
+
+  private func composerSnapshot(
+    of input: AXUIElement,
+    elements: [AXUIElement]? = nil
+  ) -> ComposerSnapshot {
+    let elements = elements ?? descendants(of: application)
+    let text = stringAttribute(kAXValueAttribute, of: input)
+
+    let nearbyButtons: [(AXUIElement, CGRect)]
+    if let inputFrame = frame(of: input) {
+      let inputCenter = CGPoint(x: inputFrame.midX, y: inputFrame.midY)
+      nearbyButtons =
+        elements
+        .filter {
+          stringAttribute(kAXRoleAttribute, of: $0) == kAXButtonRole
+        }
+        .compactMap { button in
+          frame(of: button).map { (button, $0) }
+        }
+        .filter { _, buttonFrame in
+          let dx = buttonFrame.midX - inputCenter.x
+          let dy = buttonFrame.midY - inputCenter.y
+          return abs(dx) <= inputFrame.width / 2 + 180
+            && abs(dy) <= inputFrame.height / 2 + 120
+        }
+    } else {
+      nearbyButtons = []
+    }
+
+    let sendPresent = nearbyButtons.contains { button, _ in
+      isSendButton(button)
+    }
+    let stopPresent = nearbyButtons.contains { button, _ in
+      isButton(button, containing: "stop")
+    }
+
+    let attachmentPresent =
+      composerPastedTextAttachments(
+        near: input,
+        elements: elements
+      )
+      .contains { attachment in
+        guard let attachmentFrame = frame(of: attachment) else {
+          return false
+        }
+        return attachmentFrame.width > 1 && attachmentFrame.height > 1
+      }
+
+    return ComposerSnapshot(
+      inputExists: true,
+      text: text,
+      isEmpty: isEmptyComposer(input),
+      sendPresent: sendPresent,
+      stopPresent: stopPresent,
+      pastedTextAttachmentPresent: attachmentPresent
+    )
+  }
+
+  private func stagingTextDifference(
+    observed: String?,
+    intended: String
+  ) -> String {
+    guard let observed else {
+      return "observed=nil"
+    }
+
+    let normalizedObserved = normalizedComposerText(
+      observed.trimmingCharacters(in: .whitespacesAndNewlines)
+    )
+    let normalizedIntended = normalizedComposerText(
+      intended.trimmingCharacters(in: .whitespacesAndNewlines)
+    )
+
+    let observedCharacters = Array(normalizedObserved)
+    let intendedCharacters = Array(normalizedIntended)
+    let commonCount = min(observedCharacters.count, intendedCharacters.count)
+
+    var firstDifference = commonCount
+    for index in 0..<commonCount {
+      if observedCharacters[index] != intendedCharacters[index] {
+        firstDifference = index
+        break
+      }
+    }
+
+    if firstDifference == commonCount && observedCharacters.count == intendedCharacters.count {
+      return "normalized-equal"
+    }
+
+    let lower = max(0, firstDifference - 20)
+    let observedUpper = min(observedCharacters.count, firstDifference + 40)
+    let intendedUpper = min(intendedCharacters.count, firstDifference + 40)
+
+    func escaped(_ characters: ArraySlice<Character>) -> String {
+      String(characters)
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\r", with: "\\r")
+        .replacingOccurrences(of: "\t", with: "\\t")
+    }
+
+    return [
+      "observedChars=\(observedCharacters.count)",
+      "intendedChars=\(intendedCharacters.count)",
+      "firstDiff=\(firstDifference)",
+      "observed=\"\(escaped(observedCharacters[lower..<observedUpper]))\"",
+      "intended=\"\(escaped(intendedCharacters[lower..<intendedUpper]))\"",
+    ].joined(separator: " ")
+  }
+
+  private func assessStage(
+    _ snapshot: ComposerSnapshot,
+    baseline: ComposerSnapshot,
+    intendedText: String
+  ) -> StageAssessment {
+    guard snapshot.inputExists, snapshot.sendPresent else {
+      return .processing
+    }
+
+    // Staging owns the composer from the successful clear until this
+    // assessment completes. Acceptance is therefore based on a transition
+    // away from the known empty baseline, not on AX exposing a lossless
+    // serialization of ChatGPT's web editor.
+    guard baseline.isEmpty,
+      !baseline.pastedTextAttachmentPresent
+    else {
+      return .processing
+    }
+
+    // ChatGPT exposes placeholder/control-label text such as "Ask ChatGPT"
+    // through AXValue even when the composer is semantically empty. Raw
+    // non-empty AX text therefore cannot establish inline staging.
+    if !snapshot.isEmpty,
+      let observedText = snapshot.text
+    {
+      let trimmedObserved = observedText.trimmingCharacters(
+        in: .whitespacesAndNewlines
+      )
+
+      if !trimmedObserved.isEmpty {
+        let normalizedObserved = normalizedComposerText(trimmedObserved)
+        let normalizedIntended = normalizedComposerText(
+          intendedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+
+        if normalizedObserved == normalizedIntended {
+          return .acceptedAsExactText
+        }
+
+        return .acceptedAsTransformedText
+      }
+    }
+
+    if snapshot.pastedTextAttachmentPresent {
+      return .acceptedAsAttachment
+    }
+
+    return .processing
+  }
+
+  public func stage(_ text: String) throws {
+    guard waitsForEditableInput() != nil else {
+      throw AccessibilityError.inputNotFound
+    }
+
+    try clearComposerContents()
+
+    let baseline = composerSnapshot()
+    let previousPasteboardItems = try typeDraft(text)
+    defer {
+      restorePasteboard(previousPasteboardItems)
+    }
+
+    // Paste processing is asynchronous for every payload. ChatGPT may expose
+    // the accepted payload as editor-normalized inline text or materialize it
+    // as an attachment. Do not predict the representation from payload size.
+    // Acceptance requires a sendable post-paste transition from the known
+    // empty composer baseline.
+    let deadline = Date().addingTimeInterval(10)
+
+    let startedAt = Date()
+    var lastSnapshot: ComposerSnapshot?
+    var transitions: [String] = []
+
+    while Date() < deadline {
+      let snapshot = composerSnapshot()
+
+      if snapshot != lastSnapshot {
+        let elapsed = Date().timeIntervalSince(startedAt)
+        transitions.append(
+          String(format: "%.2fs %@", elapsed, snapshot.diagnosticDescription)
+        )
+        lastSnapshot = snapshot
+      }
+
+      switch assessStage(
+        snapshot,
+        baseline: baseline,
+        intendedText: text
+      ) {
+      case .acceptedAsExactText, .acceptedAsAttachment:
+        return
+      case .acceptedAsTransformedText:
+        fputs(
+          "chatworks-ax: staged inline text was normalized by ChatGPT:\n  "
+            + stagingTextDifference(
+              observed: snapshot.text,
+              intended: text
+            ) + "\n",
+          stderr
+        )
+        return
+      case .processing:
+        break
+      }
+
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    let finalSnapshot = composerSnapshot()
+    fputs(
+      "chatworks-ax: staged text comparison:\n  "
+        + stagingTextDifference(
+          observed: finalSnapshot.text,
+          intended: text
+        ) + "\n",
+      stderr
+    )
+
+    fputs(
+      "chatworks-ax: staging transition history:\n" + transitions.map { "  \($0)\n" }.joined(),
+      stderr
+    )
+
+    throw AccessibilityError.writeFailed(
+      "verify staged ChatGPT draft or attachment",
+      .failure
+    )
   }
 
   public func guardedStageAndSend(
     _ text: String
   ) throws -> GuardedSubmissionResult {
+    // Only pre-mutation availability is safely retryable. Once staging begins,
+    // any failure propagates because the operation may already have mutated
+    // ChatGPT's composer or conversation.
     switch composerState().availability {
     case .busy:
       return GuardedSubmissionResult(status: .busy)
@@ -244,16 +661,8 @@ public struct ChatGPTAccessibility {
       break
     }
 
-    do {
-      try stageAndSendAfterAvailabilityCheck(text)
-      return GuardedSubmissionResult(status: .submitted)
-    } catch AccessibilityError.inputNotFound {
-      return GuardedSubmissionResult(status: .unavailable)
-    } catch AccessibilityError.sendControlNotFound {
-      return GuardedSubmissionResult(status: .unavailable)
-    } catch AccessibilityError.sendNotConfirmed {
-      return GuardedSubmissionResult(status: .unavailable)
-    }
+    try stageAndSendAfterAvailabilityCheck(text)
+    return GuardedSubmissionResult(status: .submitted)
   }
 
   public func stageAndSend(_ text: String) throws {
@@ -272,8 +681,9 @@ public struct ChatGPTAccessibility {
   private func stageAndSendAfterAvailabilityCheck(_ text: String) throws {
     try stage(text)
 
-    // Setting an AX value is asynchronous in ChatGPT's web-based composer.
-    // Give it one run-loop turn before finding and clicking its Send control.
+    // Keep ChatGPT frontmost through the synthetic Enter used by send().
+    // send() restores the user's previous focus only after the conversation
+    // confirms that the draft was committed.
     RunLoop.current.run(until: Date().addingTimeInterval(0.1))
 
     try send()
@@ -304,7 +714,9 @@ public struct ChatGPTAccessibility {
       RunLoop.current.run(until: Date().addingTimeInterval(0.1))
     }
     let result = AXUIElementPerformAction(selected.element, kAXPressAction as CFString)
-    guard result == .success else { throw AccessibilityError.writeFailed(result) }
+    guard result == .success else {
+      throw AccessibilityError.writeFailed("select ChatGPT chat", result)
+    }
   }
 
   private func chatControls() -> [ChatControl] {
@@ -312,12 +724,177 @@ public struct ChatGPTAccessibility {
     var controls: [ChatControl] = []
     for (index, element) in elements.enumerated() where isChatActionControl(element) {
       let nearby = elements[max(0, index - 4)..<index].reversed()
-      guard let control = nearby.compactMap(chatControl).first,
-        !["recents", "show more"].contains(control.title.lowercased())
+      guard let titleControl = nearby.compactMap(chatControl).first,
+        !["recents", "show more"].contains(titleControl.title.lowercased())
       else { continue }
-      controls.append(control)
+      controls.append(
+        ChatControl(
+          title: titleControl.title,
+          element: titleControl.element,
+          actionElement: element
+        )
+      )
     }
     return controls
+  }
+
+  private func openRenameChat(_ reference: String) throws {
+    let controls = chatControls()
+    let selected: ChatControl?
+
+    if let index = Int(reference), controls.indices.contains(index - 1) {
+      selected = controls[index - 1]
+    } else {
+      let matches = controls.filter {
+        $0.title.caseInsensitiveCompare(reference) == .orderedSame
+      }
+      if matches.count > 1 {
+        throw AccessibilityError.ambiguousChatName(reference)
+      }
+      selected = matches.first
+    }
+
+    guard let selected else {
+      throw AccessibilityError.chatNotFound(reference)
+    }
+    guard let action = selected.actionElement else {
+      throw AccessibilityError.chatNotFound(reference)
+    }
+
+    let result = AXUIElementPerformAction(
+      action,
+      "AXShowMenu" as CFString
+    )
+    guard result == .success else {
+      throw AccessibilityError.writeFailed("open ChatGPT chat actions menu", result)
+    }
+
+    RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+
+    guard
+      let rename = descendants(of: application).first(where: { element in
+        stringAttribute(kAXRoleAttribute, of: element) == kAXMenuItemRole
+          && stringAttribute(kAXTitleAttribute, of: element)?
+            .caseInsensitiveCompare("Rename") == .orderedSame
+      })
+    else {
+      throw AccessibilityError.chatNotFound("Rename menu item")
+    }
+
+    let renameResult = AXUIElementPerformAction(
+      rename,
+      kAXPressAction as CFString
+    )
+    guard renameResult == .success else {
+      throw AccessibilityError.writeFailed("choose Rename chat action", renameResult)
+    }
+
+    RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+  }
+
+  public func renameChat(
+    _ reference: String,
+    newTitle: String
+  ) throws {
+    try openRenameChat(reference)
+
+    guard !newTitle.isEmpty,
+      let source = CGEventSource(stateID: .hidSystemState)
+    else {
+      throw AccessibilityError.renameNotConfirmed(newTitle)
+    }
+
+    // Opening ChatGPT's Rename dialog selects the complete existing title.
+    // Electron does not expose that editor as an editable AX element, so
+    // replace the selected text through Unicode keyboard events.
+    for scalar in newTitle.utf16 {
+      var character = UniChar(scalar)
+
+      guard
+        let keyDown = CGEvent(
+          keyboardEventSource: source,
+          virtualKey: 0,
+          keyDown: true
+        ),
+        let keyUp = CGEvent(
+          keyboardEventSource: source,
+          virtualKey: 0,
+          keyDown: false
+        )
+      else {
+        throw AccessibilityError.renameNotConfirmed(newTitle)
+      }
+
+      keyDown.keyboardSetUnicodeString(
+        stringLength: 1,
+        unicodeString: &character
+      )
+      keyDown.post(tap: .cghidEventTap)
+
+      keyUp.keyboardSetUnicodeString(
+        stringLength: 1,
+        unicodeString: &character
+      )
+      keyUp.post(tap: .cghidEventTap)
+    }
+
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+
+    // The dialog's button label is exposed through descendants even though
+    // Electron does not consistently expose the editor itself.
+    let saveDeadline = Date().addingTimeInterval(2)
+    var save: AXUIElement?
+
+    while Date() < saveDeadline {
+      save = descendants(of: application).first(where: { element in
+        stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole
+          && controlLabels(of: element).contains(where: {
+            $0.caseInsensitiveCompare("Save") == .orderedSame
+          })
+      })
+
+      if save != nil { break }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    guard let save else {
+      throw AccessibilityError.renameControlNotFound
+    }
+
+    var saved = false
+
+    if let saveFrame = frame(of: save) {
+      click(saveFrame)
+      saved = true
+    } else {
+      let result = AXUIElementPerformAction(
+        save,
+        kAXPressAction as CFString
+      )
+      saved = result == .success
+    }
+
+    guard saved else {
+      throw AccessibilityError.renameControlNotFound
+    }
+
+    // Do not trust the click itself. Rename succeeds only when the sidebar
+    // exposes exactly one chat with the requested title.
+    let confirmationDeadline = Date().addingTimeInterval(3)
+
+    while Date() < confirmationDeadline {
+      let matches = chatControls().filter {
+        $0.title.caseInsensitiveCompare(newTitle) == .orderedSame
+      }
+
+      if matches.count == 1 {
+        return
+      }
+
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    throw AccessibilityError.renameNotConfirmed(newTitle)
   }
 
   public func newChat() throws {
@@ -342,29 +919,73 @@ public struct ChatGPTAccessibility {
   }
 
   public func send() throws {
-    guard let input = waitsForEditableInput() else { throw AccessibilityError.inputNotFound }
-    let userMessageCount = sentUserMessageControlCount()
-    guard let sendButton = waitsForComposerSendButton(near: input) else {
-      throw AccessibilityError.sendControlNotFound
-    }
-    if let frame = frame(of: sendButton) {
-      click(frame)
-      if waitsForSendSubmission(near: input, previousUserMessageCount: userMessageCount) { return }
+    guard let input = waitsForEditableInput() else {
+      throw AccessibilityError.inputNotFound
     }
 
-    _ = AXUIElementPerformAction(sendButton, kAXPressAction as CFString)
-    if waitsForSendSubmission(near: input, previousUserMessageCount: userMessageCount) { return }
+    let staged = composerSnapshot(of: input)
 
-    AXUIElementSetAttributeValue(input, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    // stage() has already established sendability. Enter-based submission
+    // operates on the staged composer itself and does not use the Send
+    // control, whose presence may change asynchronously between observations.
+    guard staged.inputExists,
+      !staged.isEmpty || staged.pastedTextAttachmentPresent
+    else {
+      throw AccessibilityError.sendNotConfirmed
+    }
+
+    let beforeStructure = AccessibilityMessageStructure(application: application)
+
+    guard let beforeAssistant = beforeStructure.latestAssistantPayload() else {
+      throw AccessibilityError.assistantMessageNotFound
+    }
+
+    let beforeAssistantFingerprint =
+      beforeStructure.semanticFingerprint(of: beforeAssistant)
+
+    let focusResult = AXUIElementSetAttributeValue(
+      input,
+      kAXFocusedAttribute as CFString,
+      kCFBooleanTrue
+    )
+    guard focusResult == .success else {
+      throw AccessibilityError.writeFailed(
+        "focus ChatGPT composer",
+        focusResult
+      )
+    }
+
     let keySource = CGEventSource(stateID: .hidSystemState)
-    CGEvent(keyboardEventSource: keySource, virtualKey: 36, keyDown: true)?.post(
-      tap: .cghidEventTap)
-    CGEvent(keyboardEventSource: keySource, virtualKey: 36, keyDown: false)?.post(
-      tap: .cghidEventTap)
-    guard !waitsForSendSubmission(near: input, previousUserMessageCount: userMessageCount) else {
-      return
+    CGEvent(
+      keyboardEventSource: keySource,
+      virtualKey: 36,
+      keyDown: true
+    )?.post(tap: .cghidEventTap)
+    CGEvent(
+      keyboardEventSource: keySource,
+      virtualKey: 36,
+      keyDown: false
+    )?.post(tap: .cghidEventTap)
+
+    let submitted = waitsForSendSubmission(
+      afterAssistantFingerprint: beforeAssistantFingerprint,
+      staged: staged,
+      input: input
+    )
+
+    restoreFocus()
+
+    guard submitted else {
+      throw AccessibilityError.sendNotConfirmed
     }
-    throw AccessibilityError.sendNotConfirmed
+  }
+
+  private func normalizedComposerText(_ text: String) -> String {
+    text.replacingOccurrences(
+      of: #"```\n[ \t]*\n```"#,
+      with: "```\n```",
+      options: .regularExpression
+    )
   }
 
   private func isEditableInput(_ element: AXUIElement) -> Bool {
@@ -467,7 +1088,7 @@ public struct ChatGPTAccessibility {
     guard stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole,
       let title = stringAttribute(kAXTitleAttribute, of: element), !title.isEmpty
     else { return nil }
-    return ChatControl(title: title, element: element)
+    return ChatControl(title: title, element: element, actionElement: nil)
   }
 
   private func isButton(_ element: AXUIElement, containing label: String) -> Bool {
@@ -501,35 +1122,109 @@ public struct ChatGPTAccessibility {
     return result
   }
 
-  private func waitsForSendSubmission(near input: AXUIElement, previousUserMessageCount: Int)
-    -> Bool
-  {
+  private func waitsForSendSubmission(
+    afterAssistantFingerprint assistantFingerprint: String,
+    staged: ComposerSnapshot,
+    input: AXUIElement
+  ) -> Bool {
     let deadline = Date().addingTimeInterval(3)
+    let startedAt = Date()
+
+    var lastComposer: ComposerSnapshot?
+    var transitions: [String] = []
+
     while Date() < deadline {
-      // A disabled or absent Send button merely means that the draft is no
-      // longer editable. The new user-message Edit control is ideal, but
-      // ChatGPT can recycle that virtualized control. Its empty composer
-      // placeholder is the reliable fallback confirmation of a submission.
-      if sentUserMessageControlCount() > previousUserMessageCount || isEmptyComposer(input) {
+      let composer = composerSnapshot(of: input)
+
+      if composer != lastComposer {
+        let elapsed = Date().timeIntervalSince(startedAt)
+        transitions.append(
+          String(
+            format: "%.2fs composer %@",
+            elapsed,
+            composer.diagnosticDescription
+          )
+        )
+        lastComposer = composer
+      }
+
+      let structure = AccessibilityMessageStructure(application: application)
+
+      // This relation is established within one AX capture. It does not rely
+      // on payload counts or traversal indices remaining stable across
+      // independent captures.
+      let committedUserTurn =
+        structure.latestUserPayloadFollowingAssistant(
+          fingerprint: assistantFingerprint
+        ) != nil
+
+      let stagedRepresentationConsumed: Bool
+      if staged.pastedTextAttachmentPresent {
+        stagedRepresentationConsumed =
+          !composer.pastedTextAttachmentPresent
+      } else {
+        stagedRepresentationConsumed = composer.isEmpty
+      }
+
+      if committedUserTurn && stagedRepresentationConsumed {
+        let rediscoveredComposer = composerSnapshot()
+        let sequence = structure.diagnosticPayloadSequence()
+
+        fputs(
+          "chatworks-ax: send confirmation evidence:\n"
+            + "  staged=\(staged.diagnosticDescription)\n"
+            + "  sameInput=\(composer.diagnosticDescription)\n"
+            + "  rediscovered=\(rediscoveredComposer.diagnosticDescription)\n"
+            + "  committedUserTurn=\(committedUserTurn)\n"
+            + "  stagedRepresentationConsumed=\(stagedRepresentationConsumed)\n"
+            + "  assistantFingerprintChars=\(assistantFingerprint.count)\n"
+            + "  payloadSequence=\(sequence.joined(separator: ","))\n",
+          stderr
+        )
+
         return true
       }
+
       RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
+
+    let finalComposer = composerSnapshot(of: input)
+    let finalStructure = AccessibilityMessageStructure(application: application)
+    let finalPayloads = finalStructure.payloads()
+    let finalRole =
+      finalStructure.latestMessagePayload(from: finalPayloads)
+      .flatMap { finalStructure.role(of: $0) } ?? "nil"
+
+    fputs(
+      "chatworks-ax: send confirmation timed out:\n" + "  payloadCount=\(finalPayloads.count) "
+        + "latestRole=\(finalRole)\n" + "  staged=\(staged.diagnosticDescription)\n"
+        + "  final=\(finalComposer.diagnosticDescription)\n"
+        + "chatworks-ax: send composer transitions:\n" + transitions.map { "  \($0)\n" }.joined(),
+      stderr
+    )
+
     return false
   }
 
   private func isEmptyComposer(_ input: AXUIElement) -> Bool {
-    guard let value = stringAttribute(kAXValueAttribute, of: input) else { return false }
-    let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmedValue.isEmpty { return true }
-    return controlLabels(of: input).contains { label in
-      trimmedValue.caseInsensitiveCompare(label.trimmingCharacters(in: .whitespacesAndNewlines))
-        == .orderedSame
+    guard let value = stringAttribute(kAXValueAttribute, of: input) else {
+      return false
     }
-  }
 
-  private func sentUserMessageControlCount() -> Int {
-    descendants(of: application).count { isButton($0, containing: "edit message") }
+    // AXValue is content. Only descriptive attributes may identify the
+    // placeholder representation of an empty ChatGPT editor.
+    let descriptiveLabels = [
+      kAXTitleAttribute,
+      kAXDescriptionAttribute,
+      kAXHelpAttribute,
+    ].compactMap {
+      stringAttribute($0, of: input)
+    }
+
+    return ComposerSemantics.isEmpty(
+      value: value,
+      descriptiveLabels: descriptiveLabels
+    )
   }
 
   private func composerSendButton(near input: AXUIElement) -> AXUIElement? {
@@ -543,15 +1238,6 @@ public struct ChatGPTAccessibility {
           < hypot(right.1.midX - inputCenter.x, right.1.midY - inputCenter.y)
       }?
       .0
-  }
-
-  private func waitsForComposerSendButton(near input: AXUIElement) -> AXUIElement? {
-    let deadline = Date().addingTimeInterval(2)
-    while Date() < deadline {
-      if let button = composerSendButton(near: input) { return button }
-      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-    }
-    return composerSendButton(near: input)
   }
 
   private func assistantCopyButtons() -> [AXUIElement] {
@@ -705,6 +1391,7 @@ public struct ChatGPTAccessibility {
 private struct ChatControl {
   let title: String
   let element: AXUIElement
+  let actionElement: AXUIElement?
 }
 
 private struct ClipboardSnapshot {

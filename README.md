@@ -30,12 +30,12 @@ Modules are selected independently of the macOS bridge. By default, `shell` and 
 
 ```sh
 npm start -- discuss 3 7
-npm start -- discuss 3 7 1 --pass 5
+npm start -- discuss 3 7 1 --pass=5
 npm start -- discuss 3 7 1 --turn
 npm start -- discuss "Research Codex efficiency" 7 --turn
 ```
 
-The default makes one pass: chat 3's latest assistant message goes to chat 7 and ChatWorks exits immediately after submission. `--pass` also explicitly selects one pass, while `--pass N` makes N such deliveries; before every delivery after the first, ChatWorks waits for and copies the prior recipient's new assistant reply once. `--turn` makes one full round-robin turn, including the handoff back to the first participant; `--turn N` makes N full rounds. Chat titles must be unique among the selected participants: indexes are only used for the initial snapshot, while subsequent routing uses the title so new messages cannot cause sidebar reordering to select the wrong chat.
+The default makes one pass: chat 3's latest assistant message goes to chat 7 and ChatWorks exits immediately after submission. `--pass` also explicitly selects one pass, while `--pass=N` makes N such deliveries; before every delivery after the first, ChatWorks waits for and copies the prior recipient's new assistant reply once. `--turn` makes one full round-robin turn, including the handoff back to the first participant; `--turn=N` makes N full rounds. Chat titles must be unique among the selected participants: indexes are only used for the initial snapshot, while subsequent routing uses the title so new messages cannot cause sidebar reordering to select the wrong chat.
 
 ## Usage
 

@@ -67,6 +67,125 @@ public struct ChatGPTAccessibilityInspector {
     self.application = application
   }
 
+  public func elementsNear(
+    labels: [String],
+    padding: CGFloat = 80,
+    limit: Int = 5_000
+  ) -> [AccessibilityComposerElementSnapshot] {
+    let elements = descendants(of: application, limit: limit)
+
+    let anchors = elements.compactMap { element -> AccessibilityFrame? in
+      let values = [
+        stringAttribute(kAXTitleAttribute, of: element),
+        stringAttribute(kAXDescriptionAttribute, of: element),
+        stringAttribute(kAXValueAttribute, of: element),
+      ].compactMap { $0 }
+
+      guard
+        labels.contains(where: { label in
+          values.contains {
+            $0.caseInsensitiveCompare(label) == .orderedSame
+          }
+        })
+      else {
+        return nil
+      }
+
+      return frame(of: element)
+    }
+
+    guard !anchors.isEmpty else { return [] }
+
+    return elements.enumerated().compactMap { index, element in
+      guard let candidate = frame(of: element) else { return nil }
+
+      let isNear = anchors.contains { anchor in
+        let region = CGRect(
+          x: anchor.x - padding,
+          y: anchor.y - padding,
+          width: anchor.width + 2 * padding,
+          height: anchor.height + 2 * padding
+        )
+        let candidateRect = CGRect(
+          x: candidate.x,
+          y: candidate.y,
+          width: candidate.width,
+          height: candidate.height
+        )
+        return region.intersects(candidateRect)
+      }
+
+      guard isNear else { return nil }
+
+      return AccessibilityComposerElementSnapshot(
+        traversalIndex: index,
+        role: stringAttribute(kAXRoleAttribute, of: element),
+        title: stringAttribute(kAXTitleAttribute, of: element),
+        description: stringAttribute(kAXDescriptionAttribute, of: element),
+        value: stringAttribute(kAXValueAttribute, of: element),
+        frame: candidate,
+        actions: actionNames(of: element),
+        enabled: booleanAttribute(kAXEnabledAttribute, of: element),
+        focused: booleanAttribute(kAXFocusedAttribute, of: element),
+        settableValue: isAttributeSettable(kAXValueAttribute, of: element)
+      )
+    }
+  }
+
+  public func editableAndSelectedElements(
+    limit: Int = 5_000
+  ) -> [[String: String]] {
+    descendants(of: application, limit: limit)
+      .enumerated()
+      .compactMap { index, element in
+        let role = stringAttribute(kAXRoleAttribute, of: element)
+        let value = stringAttribute(kAXValueAttribute, of: element)
+        let selectedText = stringAttribute(
+          kAXSelectedTextAttribute,
+          of: element
+        )
+        let valueSettable =
+          isAttributeSettable(kAXValueAttribute, of: element) == true
+        let selectedTextSettable =
+          isAttributeSettable(kAXSelectedTextAttribute, of: element) == true
+
+        var selectedRangeValue: CFTypeRef?
+        let hasSelectedRange =
+          AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &selectedRangeValue
+          ) == .success
+
+        guard
+          valueSettable
+            || selectedTextSettable
+            || selectedText != nil
+            || hasSelectedRange
+        else {
+          return nil
+        }
+
+        var result = [
+          "index": String(index),
+          "role": role ?? "",
+          "value": value ?? "",
+          "selectedText": selectedText ?? "",
+          "valueSettable": String(valueSettable),
+          "selectedTextSettable": String(selectedTextSettable),
+          "hasSelectedTextRange": String(hasSelectedRange),
+          "actions": actionNames(of: element).joined(separator: ","),
+        ]
+
+        if let frame = frame(of: element) {
+          result["frame"] =
+            "\(frame.x),\(frame.y),\(frame.width),\(frame.height)"
+        }
+
+        return result
+      }
+  }
+
   public func controls(matching labels: [String] = [], limit: Int = 5_000)
     -> [AccessibilityControlSnapshot]
   {

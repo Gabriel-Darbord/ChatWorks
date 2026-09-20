@@ -15,6 +15,7 @@ test("configured modules visit matching parts in message order", async () => {
   };
   const message = parseMessage("before\n```mcp\n{}\n```\nafter");
   const responses = await visitMessage(message, [module], {
+    scope: {},
     onBlockStart: () => undefined,
     onBlockFinish: () => undefined,
     onOutput: () => undefined,

@@ -3,7 +3,7 @@ import Foundation
 
 struct UsageError: LocalizedError {
   var errorDescription: String? {
-    "Usage: chatworks-ax read | chatworks-ax message-parts | chatworks-ax assistant-observation | chatworks-ax assistant-state | chatworks-ax composer-state | chatworks-ax scroll-to-bottom | chatworks-ax stage | chatworks-ax stage-and-send | chatworks-ax guarded-stage-and-send | chatworks-ax send | chatworks-ax list-chats | chatworks-ax select-chat <reference> | chatworks-ax new-chat | chatworks-ax inspect [label...] | chatworks-ax inspect-composer | chatworks-ax inspect-elements <label...> | chatworks-ax inspect-latest-siblings | chatworks-ax inspect-payload-candidates | chatworks-ax inspect-latest-payload-tree | chatworks-ax inspect-latest-payload"
+    "Usage: chatworks-ax read | chatworks-ax message-parts | chatworks-ax assistant-observation | chatworks-ax assistant-state | chatworks-ax composer-state | chatworks-ax scroll-to-bottom | chatworks-ax stage | chatworks-ax stage-and-send | chatworks-ax guarded-stage-and-send | chatworks-ax send | chatworks-ax list-chats | chatworks-ax select-chat <reference> | chatworks-ax new-chat | chatworks-ax rename-chat <reference> <new-title> | chatworks-ax inspect [label...] | chatworks-ax inspect-composer | chatworks-ax inspect-elements <label...> | chatworks-ax inspect-latest-siblings | chatworks-ax inspect-payload-candidates | chatworks-ax inspect-latest-payload-tree | chatworks-ax inspect-latest-payload"
   }
 }
 
@@ -15,11 +15,25 @@ struct ChatWorksBridge {
 
   static func main() {
     do {
-      let chat = try ChatGPTAccessibility.connect()
+      let arguments = Array(CommandLine.arguments.dropFirst())
+      let activatingCommands: Set<String> = [
+        "stage",
+        "stage-and-send",
+        "guarded-stage-and-send",
+        "send",
+        "select-chat",
+        "new-chat",
+        "rename-chat",
+      ]
+      let activatesChatGPT =
+        arguments.first.map { activatingCommands.contains($0) } ?? false
+
+      let chat = try ChatGPTAccessibility.connect(activate: activatesChatGPT)
       defer {
         if restoresFocus { chat.restoreFocus() }
       }
-      switch Array(CommandLine.arguments.dropFirst()) {
+
+      switch arguments {
       case ["read"]:
         FileHandle.standardOutput.write(Data(try chat.latestAssistantRawText().utf8))
       case ["message-parts"]:
@@ -59,8 +73,14 @@ struct ChatWorksBridge {
         FileHandle.standardOutput.write(data)
       case let arguments where arguments.count == 2 && arguments[0] == "select-chat":
         try chat.selectChat(arguments[1])
+      case let arguments where arguments.count == 3 && arguments[0] == "rename-chat":
+        try chat.renameChat(
+          arguments[1],
+          newTitle: arguments[2]
+        )
       case ["new-chat"]:
         try chat.newChat()
+
       case ["inspect-composer"]:
         FileHandle.standardOutput.write(
           try JSONEncoder().encode(chat.inspector().composerSnapshot())

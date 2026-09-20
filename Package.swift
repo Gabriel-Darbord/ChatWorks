@@ -10,6 +10,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "ChatWorksAX"),
-        .executableTarget(name: "ChatWorksBridge", dependencies: ["ChatWorksAX"])
+        .executableTarget(name: "ChatWorksBridge", dependencies: ["ChatWorksAX"]),
+        .testTarget(name: "ChatWorksAXTests", dependencies: ["ChatWorksAX"])
     ]
 )

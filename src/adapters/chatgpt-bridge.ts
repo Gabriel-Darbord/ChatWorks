@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import type { ParticipantCreationGateway } from "../core/participants.ts";
 import {
   messageFromAccessibilityParts,
   type AccessibilityMessagePart,
@@ -190,6 +191,41 @@ export async function guardedStageAndSend(
 ): Promise<GuardedSubmissionResult> {
   const raw = await callBridge(["guarded-stage-and-send"], text);
   return decodeGuardedSubmissionResult(JSON.parse(raw) as unknown);
+}
+
+export function participantCreationGateway(): ParticipantCreationGateway {
+  return {
+    async listChats() {
+      return JSON.parse(await callBridge(["list-chats"])) as Array<{
+        index: number;
+        title: string;
+      }>;
+    },
+
+    async newChat() {
+      await callBridge(["new-chat"]);
+    },
+
+    async stage(message) {
+      await callBridge(["stage"], message);
+    },
+
+    async send() {
+      await callBridge(["send"]);
+    },
+
+    async observeAssistant() {
+      return readAccessibilityAssistantObservation();
+    },
+
+    async composerAvailable() {
+      return (await readComposerState()).availability === "available";
+    },
+
+    async renameChat(reference, newTitle) {
+      await callBridge(["rename-chat", reference, newTitle]);
+    },
+  };
 }
 
 export function callBridge(

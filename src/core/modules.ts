@@ -1,6 +1,8 @@
 import type { Message, MessagePart } from "./message.ts";
+import type { ExecutionScope } from "./execution-scope.ts";
 
 export type ModuleContext = {
+  scope: ExecutionScope;
   onBlockStart: (block: Extract<MessagePart, { kind: "block" }>) => void;
   onBlockFinish: (block: Extract<MessagePart, { kind: "block" }>) => void;
   onOutput: (chunk: Buffer, stream: "stdout" | "stderr") => void;

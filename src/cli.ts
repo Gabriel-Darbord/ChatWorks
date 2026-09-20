@@ -3,6 +3,7 @@ import {
   guardedStageAndSend,
   NoAssistantMessageError,
   normalizeAssistantState,
+  participantCreationGateway,
   readAccessibilityAssistantObservation,
   readAccessibilityMessage,
   readComposerState,
@@ -19,17 +20,28 @@ import {
   type ModuleDescriptor,
 } from "./core/module-registry.ts";
 import { visitMessage, type MessageModule } from "./core/modules.ts";
-import {
-  discuss,
-  resolveParticipants,
-  type DiscussionGateway,
-} from "./modules/discussion.ts";
+import type { ExecutionScope } from "./core/execution-scope.ts";
+import { discuss, type DiscussionGateway } from "./modules/discussion.ts";
 import { shellModule } from "./modules/shell.ts";
+import { chatWorksModule, type ChatWorksGateway } from "./modules/chatworks.ts";
+import {
+  createParticipant,
+  participantChatTitle,
+  resolveExistingParticipants,
+  resolveParticipants,
+} from "./core/participants.ts";
+import { participantExecutionScope } from "./core/participant-execution.ts";
 import { logError } from "./core/diagnostics.ts";
 import { acquireWatchInstance } from "./core/watch-instance.ts";
+import {
+  recoverTransactionAction,
+  WatchTransactionStore,
+} from "./core/watch-transaction.ts";
 import { assertExecutionAllowed } from "./core/execution-context.ts";
+import { parseDiscussionRequest } from "./core/discussion-request.ts";
 import {
   newWatchState,
+  recoverWatchState,
   runWatchIteration,
   type WatchGateway,
   type WatchState,
@@ -40,6 +52,9 @@ const pollMilliseconds = 1_000;
 const usage = `Usage:
   npm start                         Watch ChatGPT and automatically execute, post, and send results.
   npm start -- once                  Perform one read, execute, post, and send cycle.
+  npm start -- recover               Show durable watch recovery state.
+  npm start -- recover discard       Discard recovered work without rerunning its command.
+  npm start -- recover retry         Retry a failed submission without rerunning its command.
   npm start -- read [message]        Print parsed blocks from a message, or from ChatGPT when omitted.
   npm start -- run [message]         Execute supported blocks from a message, or from ChatGPT when omitted.
   npm start -- write <message>       Stage a message in ChatGPT's composer.
@@ -47,23 +62,50 @@ const usage = `Usage:
   npm start -- chats                 List chats in ChatGPT's sidebar.
   npm start -- switch <reference>    Switch by exact name or displayed index.
   npm start -- new                   Create a new ChatGPT chat.
+  npm start -- participant list      List ChatWorks participants.
+  npm start -- participant create <id> <role...>
+                                      Create and initialize a ChatWorks participant.
   npm start -- inspect [label...]    Inspect read-only accessibility controls for maintenance.
   npm start -- discuss <chat...>     Relay the first chat's latest assistant message through participants.
-    --pass [n]                       Make n message passes (default: 1).
-    --turn [n]                       Make n full round-robin turns (default: 1).
-  --modules <ids>                    Activate comma-separated modules: shell, discussion, or none.`;
+    --participants                   Interpret arguments as ChatWorks participant ids.
+    --pass[=N]                      Make N message passes (default: 1).
+    --turn[=N]                      Make N full round-robin turns (default: 1).
+  --modules <ids>                    Activate comma-separated modules: shell, chatworks, discussion, or none.
+  --as <participant>                 Execute once/run as a ChatWorks participant.`;
+
+function chatWorksGateway(): ChatWorksGateway {
+  return {
+    async listChats() {
+      return JSON.parse(await callBridge(["list-chats"])) as Array<{
+        index: number;
+        title: string;
+      }>;
+    },
+
+    async selectChat(reference) {
+      await callBridge(["select-chat", reference]);
+    },
+
+    async send(message) {
+      await callBridge(["stage-and-send"], message);
+    },
+  };
+}
 
 const availableModules: ModuleDescriptor[] = [
   { id: "shell", messageModule: shellModule() },
+  { id: "chatworks", messageModule: chatWorksModule(chatWorksGateway()) },
   { id: "discussion" },
 ];
 
 async function runMessage(
   message: Message,
   modules: MessageModule[],
+  scope: ExecutionScope = {},
 ): Promise<string> {
   let blockNumber = 0;
   const responses = await visitMessage(message, modules, {
+    scope,
     onBlockStart(block: Block) {
       blockNumber += 1;
       console.log(`Running block ${blockNumber} (${block.language})...`);
@@ -133,6 +175,7 @@ async function watchIteration(
   modules: MessageModule[],
   state: WatchState,
   waiting: { waitingForMessage: boolean },
+  transactions: WatchTransactionStore,
 ): Promise<void> {
   try {
     await runWatchIteration(
@@ -143,6 +186,7 @@ async function watchIteration(
         },
       },
       state,
+      transactions,
     );
   } catch (error) {
     if (error instanceof NoAssistantMessageError) return;
@@ -151,6 +195,46 @@ async function watchIteration(
       `chatworks: ${error instanceof Error ? error.message : String(error)}`,
     );
     await logError("watch-iteration", error);
+  }
+}
+
+async function recover(arguments_: string[]): Promise<void> {
+  const transactions = new WatchTransactionStore();
+  const transaction = await transactions.read();
+
+  if (!transaction) {
+    console.log("No durable ChatWorks watch transaction.");
+    return;
+  }
+
+  if (arguments_.length === 0) {
+    console.log(JSON.stringify(transaction, null, 2));
+    return;
+  }
+
+  if (
+    arguments_.length !== 1 ||
+    (arguments_[0] !== "discard" && arguments_[0] !== "retry")
+  ) {
+    throw new Error("Usage: npm start -- recover [discard|retry]");
+  }
+
+  const action = arguments_[0];
+  const recovered = recoverTransactionAction(transaction, action);
+
+  await transactions.write(recovered);
+
+  if (action === "discard") {
+    console.log(
+      `Acknowledged recovered ${transaction.phase} transaction ` +
+        `${transaction.messageIdentity}. Its originating command will not ` +
+        "be executed automatically again.",
+    );
+  } else {
+    console.log(
+      `Rearmed failed submission ${transaction.messageIdentity}. ` +
+        "The persisted response may now be submitted without rerunning its command.",
+    );
   }
 }
 
@@ -190,9 +274,20 @@ async function watch(modules: MessageModule[]): Promise<void> {
 
     const state = newWatchState();
     const waiting = { waitingForMessage: false };
+    const transactions = new WatchTransactionStore();
+    const recoveredTransaction = await transactions.read();
+
+    recoverWatchState(state, recoveredTransaction);
+
+    if (recoveredTransaction?.phase === "executing") {
+      console.error(
+        `ChatWorks recovered an uncertain prior execution (${recoveredTransaction.messageIdentity}). ` +
+          "Automatic assistant-provided execution is blocked.",
+      );
+    }
 
     for (;;) {
-      await watchIteration(modules, state, waiting);
+      await watchIteration(modules, state, waiting, transactions);
       await new Promise((resolve) => setTimeout(resolve, pollMilliseconds));
     }
   } finally {
@@ -205,14 +300,17 @@ async function watch(modules: MessageModule[]): Promise<void> {
   }
 }
 
-async function once(modules: MessageModule[]): Promise<void> {
+async function once(
+  modules: MessageModule[],
+  scope: ExecutionScope = {},
+): Promise<void> {
   const observation = await readAccessibilityAssistantObservation();
 
   const result = await runOnce(
     observation,
     {
       execute(message) {
-        return runMessage(message, modules);
+        return runMessage(message, modules, scope);
       },
     },
     {
@@ -239,35 +337,67 @@ async function once(modules: MessageModule[]): Promise<void> {
   }
 }
 
-function extractModuleSelection(arguments_: string[]): {
+type GlobalOptions = {
   arguments_: string[];
   moduleIds?: string[];
-} {
+  participantId?: string;
+};
+
+function extractGlobalOptions(arguments_: string[]): GlobalOptions {
   const remaining: string[] = [];
   let moduleIds: string[] | undefined;
+  let participantId: string | undefined;
+
   for (let index = 0; index < arguments_.length; index += 1) {
-    if (arguments_[index] !== "--modules") {
-      remaining.push(arguments_[index]);
-      continue;
+    switch (arguments_[index]) {
+      case "--modules": {
+        if (moduleIds) throw new Error("--modules may be specified only once.");
+        const value = arguments_[index + 1];
+        if (!value)
+          throw new Error("--modules requires a comma-separated module list.");
+        moduleIds = value.split(",").filter(Boolean);
+        index += 1;
+        break;
+      }
+
+      case "--as": {
+        if (participantId !== undefined)
+          throw new Error("--as may be specified only once.");
+        const value = arguments_[index + 1];
+        if (!value || value.startsWith("--"))
+          throw new Error("--as requires a participant id.");
+        participantId = value;
+        index += 1;
+        break;
+      }
+
+      default:
+        remaining.push(arguments_[index]);
     }
-    if (moduleIds) throw new Error("--modules may be specified only once.");
-    const value = arguments_[index + 1];
-    if (!value)
-      throw new Error("--modules requires a comma-separated module list.");
-    moduleIds = value.split(",").filter(Boolean);
-    index += 1;
   }
-  return { arguments_: remaining, moduleIds };
+
+  return { arguments_: remaining, moduleIds, participantId };
 }
 
-function discussionGateway(): DiscussionGateway {
-  return {
+async function participantScope(
+  participantId: string | undefined,
+): Promise<ExecutionScope> {
+  return participantExecutionScope(participantId, {
     async listChats() {
       return JSON.parse(await callBridge(["list-chats"])) as Array<{
         index: number;
         title: string;
       }>;
     },
+
+    async selectChat(reference) {
+      await callBridge(["select-chat", reference]);
+    },
+  });
+}
+
+function discussionGateway(): DiscussionGateway {
+  return {
     async selectChat(reference) {
       await callBridge(["select-chat", reference]);
     },
@@ -292,60 +422,106 @@ function discussionGateway(): DiscussionGateway {
 }
 
 async function runDiscussion(arguments_: string[]): Promise<void> {
-  let passes: number | undefined;
-  let turns: number | undefined;
-  const references: string[] = [];
-  for (let index = 0; index < arguments_.length; index += 1) {
-    switch (arguments_[index]) {
-      case "--pass": {
-        const value = arguments_[index + 1];
-        if (passes !== undefined)
-          throw new Error("--pass may be specified only once.");
-        if (!value || value.startsWith("--")) {
-          passes = 1;
-          break;
-        }
-        const parsed = Number(value);
-        if (!Number.isInteger(parsed) || parsed < 1)
-          throw new Error("--pass accepts an optional positive integer.");
-        passes = parsed;
-        index += 1;
-        break;
-      }
-      case "--turn":
-        if (turns !== undefined)
-          throw new Error("--turn may be specified only once.");
-        const value = arguments_[index + 1];
-        if (!value || value.startsWith("--")) {
-          turns = 1;
-          break;
-        }
-        const parsed = Number(value);
-        if (!Number.isInteger(parsed) || parsed < 1)
-          throw new Error("--turn accepts an optional positive integer.");
-        turns = parsed;
-        index += 1;
-        break;
-      default:
-        references.push(arguments_[index]);
-    }
-  }
-  if (turns !== undefined && passes !== undefined)
-    throw new Error("Use either --turn or --pass, not both.");
+  const request = parseDiscussionRequest(arguments_);
+
+  const resolutionGateway = {
+    async listChats() {
+      return JSON.parse(await callBridge(["list-chats"])) as Array<{
+        index: number;
+        title: string;
+      }>;
+    },
+  };
+
+  const participants =
+    request.referenceMode === "participants"
+      ? await resolveParticipants(request.references, resolutionGateway)
+      : await resolveExistingParticipants(
+          request.references,
+          resolutionGateway,
+        );
+
   const gateway = discussionGateway();
-  const participants = await resolveParticipants(references, gateway);
   await discuss(participants, gateway, {
-    passes: turns !== undefined ? participants.length * turns : (passes ?? 1),
+    passes:
+      request.turns !== undefined
+        ? participants.length * request.turns
+        : (request.passes ?? 1),
     onProgress: console.log,
   });
+
   console.log("Discussion completed.");
+}
+
+async function runParticipantCommand(arguments_: string[]): Promise<void> {
+  const [subcommand, ...rest] = arguments_;
+
+  switch (subcommand) {
+    case "list": {
+      if (rest.length > 0) throw new Error(usage);
+
+      const chats: Array<{ index: number; title: string }> = JSON.parse(
+        await callBridge(["list-chats"]),
+      );
+
+      const prefix = participantChatTitle("").toLocaleLowerCase();
+      const participants = chats.flatMap((chat) => {
+        if (!chat.title.toLocaleLowerCase().startsWith(prefix)) return [];
+
+        return [
+          {
+            id: chat.title.slice(prefix.length),
+            title: chat.title,
+          },
+        ];
+      });
+
+      if (participants.length === 0) {
+        console.log("No ChatWorks participants found.");
+      } else {
+        participants.forEach((participant) =>
+          console.log(`${participant.id}  ${participant.title}`),
+        );
+      }
+      return;
+    }
+
+    case "create": {
+      const [id, ...roleParts] = rest;
+      if (!id || roleParts.length === 0) {
+        throw new Error(
+          "participant create requires an id and role instructions.\n\n" +
+            usage,
+        );
+      }
+
+      const participant = await createParticipant(
+        id,
+        { instructions: roleParts.join(" ") },
+        participantCreationGateway(),
+      );
+
+      console.log(
+        `Participant '${participant.id}' created as '${participant.chat.title}'.`,
+      );
+      return;
+    }
+
+    default:
+      throw new Error("participant requires 'list' or 'create'.\n\n" + usage);
+  }
 }
 
 async function main(): Promise<void> {
   const [command, ...rawArguments] = process.argv.slice(2);
-  const { arguments_, moduleIds } = extractModuleSelection(rawArguments);
+  const { arguments_, moduleIds, participantId } =
+    extractGlobalOptions(rawArguments);
   const active = activateModules(availableModules, moduleIds);
   const modules = messageModules(active);
+
+  if (participantId !== undefined && command !== "once" && command !== "run") {
+    throw new Error("--as is currently supported only by 'once' and 'run'.");
+  }
 
   if (!command) {
     assertExecutionAllowed();
@@ -353,10 +529,14 @@ async function main(): Promise<void> {
   }
 
   switch (command) {
+    case "recover":
+      await recover(arguments_);
+      return;
+
     case "once":
       if (arguments_.length > 0) throw new Error(usage);
       assertExecutionAllowed();
-      await once(modules);
+      await once(modules, await participantScope(participantId));
       return;
     case "read":
       printReadResult(
@@ -368,11 +548,13 @@ async function main(): Promise<void> {
       return;
     case "run":
       assertExecutionAllowed();
+      const scope = await participantScope(participantId);
       await runMessage(
         arguments_.length === 0
           ? await readAccessibilityMessage()
           : parseMessage(arguments_.join(" ")),
         modules,
+        scope,
       );
       return;
     case "write":
@@ -409,6 +591,9 @@ async function main(): Promise<void> {
       if (arguments_.length > 0) throw new Error(usage);
       await callBridge(["new-chat"]);
       console.log("New ChatGPT chat created.");
+      return;
+    case "participant":
+      await runParticipantCommand(arguments_);
       return;
     case "inspect": {
       const controls: Array<Record<string, unknown>> = JSON.parse(
