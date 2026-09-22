@@ -1,5 +1,9 @@
 import {
   callBridge,
+  selectChatGPTApplication,
+  selectInteractionPolicy,
+  type ChatGPTApplication,
+  type InteractionPolicy,
   guardedStageAndSend,
   NoAssistantMessageError,
   normalizeAssistantState,
@@ -50,6 +54,9 @@ import { runOnce } from "./core/once.ts";
 import { withTurnCheckpoint } from "./core/checkpoint.ts";
 import { formatTodos, TodoStore } from "./core/todos.ts";
 import { messageRequestsAbort } from "./core/chatworks-language.ts";
+import { classicProviderGateway } from "./providers/classic-gateway.ts";
+import { createOpenCodeProviderServer } from "./providers/opencode-http.ts";
+import { parseOpenCodeServeOptions } from "./providers/opencode-serve.ts";
 
 const pollMilliseconds = 1_000;
 const usage = `Usage:
@@ -67,6 +74,8 @@ const usage = `Usage:
   npm start -- new                   Create a new ChatGPT chat.
   npm start -- participant list      List ChatWorks participants.
   npm start -- participant create <id> <role...>
+  npm start -- --app <application> provider serve --chat <exact title>
+                                      Expose one selected ChatGPT chat as a local OpenCode provider.
                                       Create and initialize a ChatWorks participant.
   npm start -- inspect [label...]    Inspect read-only accessibility controls for maintenance.
   npm start -- discuss <chat...>     Relay the first chat's latest assistant message through participants.
@@ -74,7 +83,10 @@ const usage = `Usage:
     --pass[=N]                      Make N message passes (default: 1).
     --turn[=N]                      Make N full round-robin turns (default: 1).
   --modules <ids>                    Activate comma-separated modules: shell, chatworks, discussion, or none.
-  --as <participant>                 Execute once/run as a ChatWorks participant.`;
+  --app <application>                Target "classic" or "desktop" ChatGPT; required when both are open.
+  --interaction <policy>             Use "background" (default), "focus", or "pointer" UI interaction.
+  --as <participant>                 Execute once/run as a ChatWorks participant.
+  --checkpoint                       Check and commit the working tree after each executed turn.`;
 
 function chatWorksGateway(): ChatWorksGateway {
   return {
@@ -196,15 +208,18 @@ async function watchIteration(
   state: WatchState,
   waiting: { waitingForMessage: boolean },
   transactions: WatchTransactionStore,
+  checkpoint: boolean,
 ): Promise<void> {
   try {
+    const executor = {
+      execute(message: Message) {
+        return runMessage(message, modules);
+      },
+    };
+
     await runWatchIteration(
       watchGateway(waiting),
-      withTurnCheckpoint({
-        execute(message) {
-          return runMessage(message, modules);
-        },
-      }),
+      checkpoint ? withTurnCheckpoint(executor) : executor,
       state,
       transactions,
     );
@@ -258,7 +273,10 @@ async function recover(arguments_: string[]): Promise<void> {
   }
 }
 
-async function watch(modules: MessageModule[]): Promise<void> {
+async function watch(
+  modules: MessageModule[],
+  checkpoint: boolean,
+): Promise<void> {
   const instance = await acquireWatchInstance();
 
   let releasing = false;
@@ -307,7 +325,7 @@ async function watch(modules: MessageModule[]): Promise<void> {
     }
 
     for (;;) {
-      await watchIteration(modules, state, waiting, transactions);
+      await watchIteration(modules, state, waiting, transactions, checkpoint);
       await new Promise((resolve) => setTimeout(resolve, pollMilliseconds));
     }
   } finally {
@@ -323,16 +341,18 @@ async function watch(modules: MessageModule[]): Promise<void> {
 async function once(
   modules: MessageModule[],
   scope: ExecutionScope = {},
+  checkpoint = false,
 ): Promise<void> {
   const observation = await readAccessibilityAssistantObservation();
+  const executor = {
+    execute(message: Message) {
+      return runMessage(message, modules, scope);
+    },
+  };
 
   const result = await runOnce(
     observation,
-    withTurnCheckpoint({
-      execute(message) {
-        return runMessage(message, modules, scope);
-      },
-    }),
+    checkpoint ? withTurnCheckpoint(executor) : executor,
     {
       async submit(response) {
         return (await guardedStageAndSend(response)).status;
@@ -361,12 +381,18 @@ type GlobalOptions = {
   arguments_: string[];
   moduleIds?: string[];
   participantId?: string;
+  application?: ChatGPTApplication;
+  interactionPolicy: InteractionPolicy;
+  checkpoint: boolean;
 };
 
 function extractGlobalOptions(arguments_: string[]): GlobalOptions {
   const remaining: string[] = [];
   let moduleIds: string[] | undefined;
   let participantId: string | undefined;
+  let application: ChatGPTApplication | undefined;
+  let interactionPolicy: InteractionPolicy = "background";
+  let checkpoint = false;
 
   for (let index = 0; index < arguments_.length; index += 1) {
     switch (arguments_[index]) {
@@ -391,12 +417,54 @@ function extractGlobalOptions(arguments_: string[]): GlobalOptions {
         break;
       }
 
+      case "--app": {
+        if (application !== undefined)
+          throw new Error("--app may be specified only once.");
+        const value = arguments_[index + 1];
+        if (value !== "classic" && value !== "desktop") {
+          throw new Error("--app requires 'classic' or 'desktop'.");
+        }
+        application = value;
+        index += 1;
+        break;
+      }
+
+      case "--checkpoint": {
+        if (checkpoint)
+          throw new Error("--checkpoint may be specified only once.");
+        checkpoint = true;
+        break;
+      }
+
+      case "--interaction": {
+        const value = arguments_[index + 1];
+        if (
+          value !== "background" &&
+          value !== "focus" &&
+          value !== "pointer"
+        ) {
+          throw new Error(
+            "--interaction requires 'background', 'focus', or 'pointer'.",
+          );
+        }
+        interactionPolicy = value;
+        index += 1;
+        break;
+      }
+
       default:
         remaining.push(arguments_[index]);
     }
   }
 
-  return { arguments_: remaining, moduleIds, participantId };
+  return {
+    arguments_: remaining,
+    moduleIds,
+    participantId,
+    application,
+    interactionPolicy,
+    checkpoint,
+  };
 }
 
 async function participantScope(
@@ -532,16 +600,61 @@ async function runParticipantCommand(arguments_: string[]): Promise<void> {
   }
 }
 
+async function runProvider(
+  arguments_: string[],
+  application: ChatGPTApplication | undefined,
+): Promise<void> {
+  const [subcommand, ...rest] = arguments_;
+  if (subcommand !== "serve") {
+    throw new Error("provider requires 'serve'.\n\n" + usage);
+  }
+  if (!application) {
+    throw new Error("provider serve requires --app classic or --app desktop.");
+  }
+
+  const options = parseOpenCodeServeOptions(rest);
+  if (options.chat !== "current") {
+    await callBridge(["select-chat", options.chat]);
+  }
+
+  const server = createOpenCodeProviderServer(classicProviderGateway());
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(options.port, "127.0.0.1", resolve);
+  });
+  console.log(
+    `ChatWorks OpenCode provider is bound to '${options.chat}' at http://127.0.0.1:${options.port}/v1. Press Ctrl-C to stop.`,
+  );
+
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+      server.close(() => resolve());
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+}
+
 async function main(): Promise<void> {
-  const [command, ...rawArguments] = process.argv.slice(2);
+  const options = extractGlobalOptions(process.argv.slice(2));
+  const [command, ...arguments_] = options.arguments_;
 
   if (command === "--help" || command === "-h") {
     console.log(usage);
     return;
   }
 
-  const { arguments_, moduleIds, participantId } =
-    extractGlobalOptions(rawArguments);
+  const {
+    moduleIds,
+    participantId,
+    application,
+    interactionPolicy,
+    checkpoint,
+  } = options;
+  selectChatGPTApplication(application);
+  selectInteractionPolicy(interactionPolicy);
   const active = activateModules(availableModules, moduleIds);
   const modules = messageModules(active);
 
@@ -551,7 +664,7 @@ async function main(): Promise<void> {
 
   if (!command) {
     assertExecutionAllowed();
-    return watch(modules);
+    return watch(modules, checkpoint);
   }
 
   switch (command) {
@@ -562,7 +675,7 @@ async function main(): Promise<void> {
     case "once":
       if (arguments_.length > 0) throw new Error(usage);
       assertExecutionAllowed();
-      await once(modules, await participantScope(participantId));
+      await once(modules, await participantScope(participantId), checkpoint);
       return;
     case "read":
       printReadResult(
@@ -620,6 +733,9 @@ async function main(): Promise<void> {
       return;
     case "participant":
       await runParticipantCommand(arguments_);
+      return;
+    case "provider":
+      await runProvider(arguments_, application);
       return;
     case "inspect": {
       const controls: Array<Record<string, unknown>> = JSON.parse(

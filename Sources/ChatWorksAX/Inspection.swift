@@ -116,6 +116,12 @@ public struct ChatGPTAccessibilityInspector {
       }
   }
 
+  public func allElements(limit: Int = 5_000) -> [AccessibilityControlSnapshot] {
+    descendants(of: application, limit: limit)
+      .enumerated()
+      .map { snapshot(of: $0.element, traversalIndex: $0.offset) }
+  }
+
   public func elements(matching labels: [String], limit: Int = 5_000)
     -> [AccessibilityControlSnapshot]
   {

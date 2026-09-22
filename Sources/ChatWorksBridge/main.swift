@@ -3,29 +3,50 @@ import Foundation
 
 struct UsageError: LocalizedError {
   var errorDescription: String? {
-    "Usage: chatworks-ax read | chatworks-ax message-parts | chatworks-ax assistant-observation | chatworks-ax assistant-state | chatworks-ax composer-state | chatworks-ax scroll-to-bottom | chatworks-ax stage | chatworks-ax stage-and-send | chatworks-ax guarded-stage-and-send | chatworks-ax send | chatworks-ax list-chats | chatworks-ax select-chat <reference> | chatworks-ax new-chat | chatworks-ax rename-chat <reference> <new-title> | chatworks-ax inspect [label...] | chatworks-ax inspect-composer | chatworks-ax inspect-conversation | chatworks-ax inspect-chat-attributes | chatworks-ax inspect-elements <label...>"
+    "Usage: chatworks-ax [--bundle-id <identifier>] [--interaction background|focus|pointer] <command>"
   }
+}
+
+private func parseConnection(
+  _ arguments: [String]
+) throws -> (bundleIdentifier: String?, interactionPolicy: InteractionPolicy, command: [String]) {
+  var bundleIdentifier: String?
+  var interactionPolicy: InteractionPolicy = .background
+  var index = 0
+
+  while index < arguments.count {
+    switch arguments[index] {
+    case "--bundle-id":
+      guard bundleIdentifier == nil, index + 1 < arguments.count, !arguments[index + 1].isEmpty
+      else { throw UsageError() }
+      bundleIdentifier = arguments[index + 1]
+      index += 2
+    case "--interaction":
+      guard index + 1 < arguments.count,
+        let policy = InteractionPolicy(rawValue: arguments[index + 1])
+      else { throw UsageError() }
+      interactionPolicy = policy
+      index += 2
+    default:
+      return (bundleIdentifier, interactionPolicy, Array(arguments[index...]))
+    }
+  }
+
+  throw UsageError()
 }
 
 @main
 struct ChatWorksBridge {
   static func main() {
     do {
-      let arguments = Array(CommandLine.arguments.dropFirst())
-      let activatingCommands: Set<String> = [
-        "stage",
-        "stage-and-send",
-        "guarded-stage-and-send",
-        "send",
-        "submit-staged-by-send-control",
-        "select-chat",
-        "new-chat",
-        "rename-chat",
-      ]
-      let activatesChatGPT =
-        arguments.first.map { activatingCommands.contains($0) } ?? false
+      let target = try parseConnection(Array(CommandLine.arguments.dropFirst()))
+      let arguments = target.command
 
-      let chat = try ChatGPTAccessibility.connect(activate: activatesChatGPT)
+      let chat = try ChatGPTAccessibility.connect(
+        bundleIdentifier: target.bundleIdentifier,
+        interactionPolicy: target.interactionPolicy
+      )
+      defer { chat.restoreFocus() }
       switch arguments {
       case ["read"]:
         FileHandle.standardOutput.write(Data(try chat.latestAssistantRawText().utf8))
@@ -44,7 +65,7 @@ struct ChatWorksBridge {
           try JSONEncoder().encode(chat.composerState())
         )
       case ["scroll-to-bottom"]:
-        chat.scrollToBottom()
+        try chat.scrollToBottom()
       case ["stage"]:
         try chat.stage(
           String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self))
@@ -87,6 +108,10 @@ struct ChatWorksBridge {
       case ["inspect-conversation"]:
         FileHandle.standardOutput.write(
           try JSONEncoder().encode(chat.inspector().conversationSnapshot())
+        )
+      case ["inspect-all"]:
+        FileHandle.standardOutput.write(
+          try JSONEncoder().encode(chat.inspector().allElements())
         )
       case ["inspect-chat-attributes"]:
         FileHandle.standardOutput.write(

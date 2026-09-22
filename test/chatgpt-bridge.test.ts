@@ -1,12 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  bridgeArguments,
   decodeAccessibilityAssistantObservation,
   decodeComposerState,
   decodeGuardedSubmissionResult,
+  selectChatGPTApplication,
+  selectInteractionPolicy,
   decodeAccessibilityMessageParts,
   normalizeAssistantState,
 } from "../src/adapters/chatgpt-bridge.ts";
+
+test("adds an explicit bundle target when an application is selected", () => {
+  selectInteractionPolicy("background");
+  selectChatGPTApplication("classic");
+  assert.deepEqual(bridgeArguments(["composer-state"]), [
+    "--bundle-id",
+    "com.openai.chat",
+    "--interaction",
+    "background",
+    "composer-state",
+  ]);
+
+  selectInteractionPolicy("pointer");
+  selectChatGPTApplication("desktop");
+  assert.deepEqual(bridgeArguments(["composer-state"]), [
+    "--bundle-id",
+    "com.openai.codex",
+    "--interaction",
+    "pointer",
+    "composer-state",
+  ]);
+
+  selectChatGPTApplication(undefined);
+  selectInteractionPolicy("background");
+});
 
 test("normalizes assistant-state from structural readiness fields only", () => {
   const first = normalizeAssistantState(

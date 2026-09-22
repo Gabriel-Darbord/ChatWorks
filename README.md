@@ -6,7 +6,9 @@ With no command, ChatWorks continuously watches the active ChatGPT chat. Each di
 
 `once` performs that same cycle exactly once and exits; it does not poll for another message.
 
-Automatic and `once` cycles use one native `stage-and-send` operation, so ChatGPT is activated only once per result. Focus and pointer restoration are currently disabled while the interaction behavior is refined.
+ChatWorks defaults to `--interaction background`: it never activates ChatGPT, moves the pointer, or emits keyboard input. It first uses semantic accessibility operations. `--interaction focus` permits a focused keyboard fallback, and `--interaction pointer` additionally permits a physical-click fallback. Any focus or pointer interaction is restored after the bridge operation.
+
+ChatWorks does not commit changes automatically. Add `--checkpoint` to make a cycle run `npm run check` and commit the complete working tree after execution.
 
 The individual commands are available for inspection and manual control:
 
@@ -57,7 +59,13 @@ npm start -- switch 1
 npm start -- switch "Dev contributor 1"
 npm start -- new
 npm start -- discuss 3 7 --turn
+npm start -- --app classic once
+npm start -- --interaction focus send "A message that needs the keyboard fallback"
 ```
+
+Use `--app classic` to target ChatGPT Classic (`com.openai.chat`) or `--app desktop` for the newer ChatGPT desktop app (`com.openai.codex`). When both are running, ChatWorks requires this explicit selection instead of guessing.
+
+Use `--interaction background` (the default) while working normally in other apps. Escalate to `focus` only when the target does not accept direct accessibility writes; use `pointer` only for controls that cannot be invoked semantically or by keyboard.
 
 Node 22.6 or later runs the TypeScript files directly with native type stripping. The app has no runtime npm dependencies; local TypeScript and Node type definitions are development dependencies used by `npm run typecheck`. `npm start` builds `chatworks-ax`, then starts the TypeScript orchestrator.
 
@@ -79,6 +87,75 @@ The initial `shell` module handles only `sh`, `bash`, and `zsh` blocks. It execu
 The reader restores the clipboard after every copy. It never uses rendered accessibility text as the execution source.
 
 The `mcp` fence language is intentionally reserved until its request schema is defined. Shell blocks can call a locally installed MCP CLI during this proof of concept.
+
+## OpenCode Provider
+
+The experimental `chatworks` provider exposes one explicitly named chat in
+either ChatGPT Classic or the current ChatGPT desktop app to OpenCode. It uses
+an OpenAI-compatible loopback protocol only because OpenCode already supports
+that adapter; the selected ChatGPT app remains the model behind the provider.
+
+Start it against a dedicated Classic chat. This selects that chat once at
+startup, then uses the configured background Accessibility policy for every
+turn:
+
+```sh
+npm start -- --app classic provider serve --chat "ChatWorks provider"
+npm start -- --app desktop provider serve --chat "ChatWorks provider"
+```
+
+For a fresh, untitled conversation, `--chat current` explicitly binds the
+currently displayed chat without navigating the sidebar. Use a named chat for
+a durable binding once the app has assigned a title.
+
+The server listens only on `127.0.0.1:32123` by default. Use `--port <number>`
+to choose another local port. A provider turn is serialized end-to-end, so
+OpenCode cannot interleave prompts or repairs in the bound chat.
+
+Configure OpenCode with the existing OpenAI-compatible adapter:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "chatworks": {
+      "name": "ChatWorks",
+      "npm": "@ai-sdk/openai-compatible",
+      "env": [],
+      "models": {
+        "chatworks": {
+          "name": "ChatWorks",
+          "tool_call": true,
+          "limit": { "context": 128000, "output": 4096 }
+        }
+      },
+      "options": {
+        "apiKey": "local",
+        "baseURL": "http://127.0.0.1:32123/v1"
+      }
+    }
+  }
+}
+```
+
+This adds `chatworks/chatworks`; it does not replace the regular
+`openai/...` models. Keep an OpenAI model as OpenCode's default when that is
+the normal workflow, and select the ChatWorks model only for the session or
+agent that should use the bound Classic chat.
+
+Classic returns ordinary assistant text as usual. To call an OpenCode tool, it
+uses one or more ordered `tool` fences, each with one JSON object:
+
+````text
+```tool
+{"name":"read","input":{"path":"src/app.ts"}}
+```
+````
+
+ChatWorks validates every fence before returning any tool call. A malformed
+batch receives at most two in-chat repair requests with an exact replacement
+example; it never executes a valid prefix. Prefer fewer calls when later work
+depends on earlier results, but independent calls may be batched.
 
 ## Block Contract
 

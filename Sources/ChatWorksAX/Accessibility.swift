@@ -4,6 +4,7 @@ import ApplicationServices
 public enum AccessibilityError: LocalizedError {
   case accessibilityPermissionMissing
   case chatGPTNotRunning
+  case multipleChatGPTApplicationsRunning([String])
   case inputNotFound
   case composerBusy
   case composerUnavailable
@@ -20,6 +21,8 @@ public enum AccessibilityError: LocalizedError {
   case renameControlNotFound
   case renameNotConfirmed(String)
   case clipboardDidNotChange
+  case interactionRequiresFocus
+  case interactionRequiresPointer
 
   public var errorDescription: String? {
     switch self {
@@ -27,6 +30,10 @@ public enum AccessibilityError: LocalizedError {
       return "Accessibility permission is required for the invoking terminal."
     case .chatGPTNotRunning:
       return "ChatGPT is not running."
+    case .multipleChatGPTApplicationsRunning(let identifiers):
+      return
+        "More than one supported ChatGPT application is running "
+        + "(\(identifiers.joined(separator: ", "))). Select one explicitly."
     case .inputNotFound:
       return "Could not find an editable ChatGPT input."
     case .composerBusy:
@@ -63,6 +70,11 @@ public enum AccessibilityError: LocalizedError {
       return "ChatGPT did not confirm the renamed chat '\(title)'."
     case .clipboardDidNotChange:
       return "ChatGPT did not place copied message contents on the clipboard."
+    case .interactionRequiresFocus:
+      return
+        "This ChatGPT control requires focus. Retry with --interaction focus or --interaction pointer."
+    case .interactionRequiresPointer:
+      return "This ChatGPT control requires pointer input. Retry with --interaction pointer."
     }
   }
 }
@@ -106,6 +118,15 @@ public enum GuardedSubmissionStatus: String, Encodable {
   case submitted
   case busy
   case unavailable
+}
+
+public enum InteractionPolicy: String {
+  case background
+  case focus
+  case pointer
+
+  var allowsFocus: Bool { self == .focus || self == .pointer }
+  var allowsPointer: Bool { self == .pointer }
 }
 
 public struct GuardedSubmissionResult: Encodable {
@@ -154,6 +175,10 @@ private enum StageAssessment {
 public struct ChatGPTAccessibility {
   let application: AXUIElement
   private let previousFocus: FocusSnapshot
+  private let interactionState = InteractionState()
+  private let interactionPolicy: InteractionPolicy
+  private let requiresChatMode: Bool
+  private let classicAccessibilityReader: ClassicAccessibilityReader?
   private static let supportedBundleIdentifiers = ["com.openai.codex", "com.openai.chat"]
   // Physical clicks are compatibility fallbacks for controls whose semantic
   // AX actions are ineffective. Never leave the user's pointer at the
@@ -162,27 +187,37 @@ public struct ChatGPTAccessibility {
 
   public static func connect(
     bundleIdentifier: String? = nil,
-    activate: Bool = false
+    interactionPolicy: InteractionPolicy = .background
   ) throws -> Self {
     guard AXIsProcessTrusted() else { throw AccessibilityError.accessibilityPermissionMissing }
     let previousFocus = FocusSnapshot.capture()
-    let identifiers = bundleIdentifier.map { [$0] } ?? supportedBundleIdentifiers
-    let running = NSWorkspace.shared.runningApplications.first {
-      identifiers.contains($0.bundleIdentifier ?? "") || $0.localizedName == "ChatGPT"
+    let running = NSWorkspace.shared.runningApplications.filter { application in
+      guard let identifier = application.bundleIdentifier else { return false }
+      return bundleIdentifier.map { $0 == identifier }
+        ?? supportedBundleIdentifiers.contains(identifier)
     }
-    guard let running else { throw AccessibilityError.chatGPTNotRunning }
 
-    if activate {
-      running.activate(options: [])
+    guard !running.isEmpty else { throw AccessibilityError.chatGPTNotRunning }
+    guard running.count == 1, let application = running.first else {
+      throw AccessibilityError.multipleChatGPTApplicationsRunning(
+        running.compactMap(\.bundleIdentifier).sorted()
+      )
     }
 
     return Self(
-      application: AXUIElementCreateApplication(running.processIdentifier),
-      previousFocus: previousFocus
+      application: AXUIElementCreateApplication(application.processIdentifier),
+      previousFocus: previousFocus,
+      interactionPolicy: interactionPolicy,
+      requiresChatMode: application.bundleIdentifier != "com.openai.chat",
+      classicAccessibilityReader: application.bundleIdentifier == "com.openai.chat"
+        ? ClassicAccessibilityReader(
+          application: AXUIElementCreateApplication(application.processIdentifier))
+        : nil
     )
   }
 
   public func restoreFocus() {
+    guard interactionState.didTakeFocus else { return }
     previousFocus.restore()
   }
 
@@ -195,7 +230,7 @@ public struct ChatGPTAccessibility {
     let payloads = structure.payloads()
 
     guard let latest = structure.latestMessagePayload(from: payloads) else {
-      throw AccessibilityError.assistantMessageNotFound
+      return try latestClassicAccessibilityObservation()
     }
 
     let role = structure.role(of: latest)
@@ -216,7 +251,7 @@ public struct ChatGPTAccessibility {
 
   public func latestAssistantRawText() throws -> String {
     guard let copyButton = assistantCopyButtons().first else {
-      throw AccessibilityError.copyControlNotFound
+      return try latestClassicAccessibilityRawText()
     }
 
     let clipboard = ClipboardSnapshot.capture()
@@ -228,11 +263,11 @@ public struct ChatGPTAccessibility {
     // failed click: a caller must never accidentally copy another message.
     _ = AXUIElementPerformAction(copyButton, "AXScrollToVisible" as CFString)
     RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    guard let copyFrame = frame(of: copyButton) else {
-      throw AccessibilityError.copyControlNotFound
-    }
     let changeCount = pasteboard.changeCount
-    click(copyFrame)
+    let result = AXUIElementPerformAction(copyButton, kAXPressAction as CFString)
+    guard result == .success else {
+      throw AccessibilityError.writeFailed("press ChatGPT Copy", result)
+    }
     guard let text = clipboardText(after: changeCount, in: pasteboard) else {
       throw AccessibilityError.clipboardDidNotChange
     }
@@ -240,14 +275,34 @@ public struct ChatGPTAccessibility {
   }
 
   public func assistantMessageState() -> AssistantMessageState {
-    AssistantMessageState(
+    if let classicAccessibilityReader, !classicAccessibilityReader.latestParts().isEmpty {
+      return AssistantMessageState(responseHeadingCount: 1, scrollToBottomVisible: false)
+    }
+    return AssistantMessageState(
       responseHeadingCount: descendants(of: application).count(where: isAssistantMessageHeading),
       scrollToBottomVisible: hasVisibleScrollToBottomButton()
     )
   }
 
-  public func scrollToBottom() {
-    scrollToBottomIfNeeded()
+  private func latestClassicAccessibilityObservation() throws -> AccessibilityAssistantObservation {
+    guard let classicAccessibilityReader else {
+      throw AccessibilityError.assistantMessageNotFound
+    }
+    let parts = classicAccessibilityReader.latestParts()
+    guard !parts.isEmpty else { throw AccessibilityError.assistantMessageNotFound }
+    return AccessibilityAssistantObservation(latestMessageRole: "assistant", parts: parts)
+  }
+
+  private func latestClassicAccessibilityRawText() throws -> String {
+    let parts = try latestClassicAccessibilityObservation().parts
+    return parts.compactMap { part in
+      guard part.kind == "code", let source = part.source else { return nil }
+      return "```\(part.language ?? "")\n\(source)\n```"
+    }.joined(separator: "\n\n")
+  }
+
+  public func scrollToBottom() throws {
+    try scrollToBottomIfNeeded()
   }
 
   public func composerState() -> ComposerState {
@@ -270,9 +325,24 @@ public struct ChatGPTAccessibility {
     return ComposerState(availability: .unavailable)
   }
 
-  private func typeDraft(_ text: String) throws -> [NSPasteboardItem] {
+  private func typeDraft(_ text: String) throws -> [NSPasteboardItem]? {
     guard let input = waitsForEditableInput() else {
       throw AccessibilityError.inputNotFound
+    }
+
+    // Setting a writable AX value does not require activation, focus, or
+    // synthetic keyboard input. Prefer it for the normal background path.
+    let valueResult = AXUIElementSetAttributeValue(
+      input,
+      kAXValueAttribute as CFString,
+      text as CFTypeRef
+    )
+    if valueResult == .success {
+      return nil
+    }
+
+    guard interactionPolicy.allowsFocus else {
+      throw AccessibilityError.interactionRequiresFocus
     }
 
     let focusResult = AXUIElementSetAttributeValue(
@@ -283,6 +353,7 @@ public struct ChatGPTAccessibility {
     guard focusResult == .success else {
       throw AccessibilityError.writeFailed("focus ChatGPT composer", focusResult)
     }
+    interactionState.didTakeFocus = true
 
     let pasteboard = NSPasteboard.general
     let previousItems =
@@ -406,7 +477,7 @@ public struct ChatGPTAccessibility {
   private func composerSnapshot() -> ComposerSnapshot {
     let elements = descendants(of: application)
 
-    guard let input = elements.last(where: isEditableInput) else {
+    guard let input = composerInput(in: elements) else {
       return ComposerSnapshot(
         inputExists: false,
         text: nil,
@@ -448,9 +519,7 @@ public struct ChatGPTAccessibility {
       nearbyButtons = []
     }
 
-    let sendPresent = nearbyButtons.contains { button, _ in
-      isSendButton(button)
-    }
+    let sendPresent = sendControl(for: input, elements: elements) != nil
     let stopPresent = nearbyButtons.contains { button, _ in
       isButton(button, containing: "stop")
     }
@@ -589,7 +658,9 @@ public struct ChatGPTAccessibility {
     let baseline = composerSnapshot()
     let previousPasteboardItems = try typeDraft(text)
     defer {
-      restorePasteboard(previousPasteboardItems)
+      if let previousPasteboardItems {
+        restorePasteboard(previousPasteboardItems)
+      }
     }
 
     // Paste processing is asynchronous for every payload. ChatGPT may expose
@@ -801,18 +872,20 @@ public struct ChatGPTAccessibility {
     // AppKit exposes this action by name but does not publish a Swift constant for it.
     _ = AXUIElementPerformAction(selected.element, "AXScrollToVisible" as CFString)
     RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    if let selectedFrame = frame(of: selected.element) {
-      click(selectedFrame)
-      RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-    }
     let result = AXUIElementPerformAction(selected.element, kAXPressAction as CFString)
-    guard result == .success else {
+    if result == .success { return }
+    guard interactionPolicy.allowsPointer, let selectedFrame = frame(of: selected.element) else {
       throw AccessibilityError.writeFailed("select ChatGPT chat", result)
     }
+    try click(selectedFrame)
   }
 
   private func chatControls() -> [ChatControl] {
     let elements = descendants(of: application)
+    if !requiresChatMode {
+      return classicChatControls(in: elements)
+    }
+
     var controls: [ChatControl] = []
     for (index, element) in elements.enumerated() where isChatActionControl(element) {
       let nearby = elements[max(0, index - 4)..<index].reversed()
@@ -828,6 +901,62 @@ public struct ChatGPTAccessibility {
       )
     }
     return controls
+  }
+
+  private func classicChatControls(in elements: [AXUIElement]) -> [ChatControl] {
+    var controls: [ChatControl] = []
+    var inRecents = false
+
+    for element in elements {
+      if stringAttribute(kAXRoleAttribute, of: element) == kAXHeadingRole,
+        controlLabels(of: element).contains(where: {
+          $0.caseInsensitiveCompare("Recents") == .orderedSame
+        })
+      {
+        inRecents = true
+        continue
+      }
+
+      guard inRecents,
+        stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole,
+        let title = controlLabels(of: element).first,
+        let candidateFrame = frame(of: element),
+        candidateFrame.width >= 150,
+        candidateFrame.minX < 264,
+        isInsideList(element),
+        actionNames(of: element).contains("AXShowMenu")
+      else { continue }
+
+      controls.append(
+        ChatControl(title: title, element: element, actionElement: element)
+      )
+    }
+
+    return controls
+  }
+
+  private func isInsideList(_ element: AXUIElement, limit: Int = 64) -> Bool {
+    var current = element
+
+    for _ in 0..<limit {
+      var parentValue: CFTypeRef?
+      guard
+        AXUIElementCopyAttributeValue(
+          current,
+          kAXParentAttribute as CFString,
+          &parentValue
+        ) == .success,
+        let parentValue
+      else { return false }
+
+      let parent = parentValue as! AXUIElement
+      if stringAttribute(kAXRoleAttribute, of: parent) == kAXListRole {
+        return true
+      }
+      current = parent
+    }
+
+    return false
   }
 
   private func openRenameChat(_ reference: String) throws {
@@ -955,15 +1084,11 @@ public struct ChatGPTAccessibility {
 
     var saved = false
 
-    if let saveFrame = frame(of: save) {
-      click(saveFrame)
+    let result = AXUIElementPerformAction(save, kAXPressAction as CFString)
+    saved = result == .success
+    if !saved, interactionPolicy.allowsPointer, let saveFrame = frame(of: save) {
+      try click(saveFrame)
       saved = true
-    } else {
-      let result = AXUIElementPerformAction(
-        save,
-        kAXPressAction as CFString
-      )
-      saved = result == .success
     }
 
     guard saved else {
@@ -996,59 +1121,88 @@ public struct ChatGPTAccessibility {
         guard let candidateFrame = frame(of: candidate) else { return nil }
         return (candidate, candidateFrame)
       }
-    guard let button = buttons.max(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height })?.0
+    guard let button = buttons.max(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height })
     else {
       throw AccessibilityError.newChatControlNotFound
     }
-    guard let buttonFrame = frame(of: button) else {
-      throw AccessibilityError.newChatControlNotFound
+    let result = AXUIElementPerformAction(button.0, kAXPressAction as CFString)
+    if result != .success {
+      guard interactionPolicy.allowsPointer else {
+        throw AccessibilityError.writeFailed("press ChatGPT New chat", result)
+      }
+      try click(button.1)
     }
-    // AXPress is advertised by this control and returns success, but live
-    // characterization showed that it does not enter ChatGPT's New Chat
-    // interface. Use the physical-click compatibility fallback.
-    click(buttonFrame)
+    guard requiresChatMode else {
+      // ChatGPT Classic has no Chat/Work control. Its independent composer is
+      // the available continuation point after a New chat action.
+      guard waitsForEditableInput() != nil else {
+        throw AccessibilityError.inputNotFound
+      }
+      return
+    }
+
     // ChatGPT retains old message controls in its virtualized AX tree, so their
-    // presence cannot confirm (or reject) the new-chat transition.
+    // presence cannot confirm a new-chat transition. The mode control does.
+    RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+    do {
+      try activateChatMode()
+      return
+    } catch {
+      guard interactionPolicy.allowsPointer else { throw error }
+    }
+
+    // This build reports AXPress success without opening a new chat. The
+    // prior semantic attempt and missing mode transition make this single
+    // physical click an explicit, last-resort compatibility fallback.
+    try click(button.1)
     RunLoop.current.run(until: Date().addingTimeInterval(0.25))
     try activateChatMode()
   }
 
   public func submitStagedBySendControl() throws {
     guard let input = waitsForEditableInput(),
-      let inputFrame = frame(of: input)
+      let sendControl = sendControl(for: input)
     else {
       throw AccessibilityError.inputNotFound
     }
 
-    let inputCenter = CGPoint(x: inputFrame.midX, y: inputFrame.midY)
+    let result = AXUIElementPerformAction(sendControl.element, kAXPressAction as CFString)
+    guard result == .success else {
+      throw AccessibilityError.writeFailed("press ChatGPT Send", result)
+    }
+  }
 
-    let candidates = descendants(of: application)
+  private func sendControl(
+    for input: AXUIElement,
+    elements: [AXUIElement]? = nil
+  ) -> (element: AXUIElement, frame: CGRect)? {
+    let elements = elements ?? descendants(of: application)
+    let sendButtons =
+      elements
       .filter { isSendButton($0) }
-      .compactMap { button -> CGRect? in
+      .compactMap { button -> (AXUIElement, CGRect)? in
         guard let buttonFrame = frame(of: button) else {
           return nil
         }
-
-        let dx = buttonFrame.midX - inputCenter.x
-        let dy = buttonFrame.midY - inputCenter.y
-
-        guard abs(dx) <= inputFrame.width / 2 + 180,
-          abs(dy) <= inputFrame.height / 2 + 120
-        else {
-          return nil
-        }
-
-        return buttonFrame
+        return (button, buttonFrame)
       }
 
-    guard candidates.count == 1 else {
-      throw AccessibilityError.sendNotConfirmed
+    if let inputFrame = frame(of: input) {
+      let inputCenter = CGPoint(x: inputFrame.midX, y: inputFrame.midY)
+      let candidates = sendButtons.filter { _, buttonFrame in
+        let dx = buttonFrame.midX - inputCenter.x
+        let dy = buttonFrame.midY - inputCenter.y
+        return abs(dx) <= inputFrame.width / 2 + 180
+          && abs(dy) <= inputFrame.height / 2 + 120
+      }
+      if candidates.count == 1 { return candidates[0] }
     }
 
-    // AXPress is advertised by ChatGPT's Send control but live
-    // characterization showed that it does not submit the draft. Reproduce
-    // the effective user interaction with the pointer-restoring click helper.
-    click(candidates[0])
+    // At its minimum window size Classic can retain a usable AX editor while
+    // reporting an unusable WebView frame. Its uniquely labelled Send control
+    // remains a safe semantic pairing in that layout.
+    guard !requiresChatMode, sendButtons.count == 1 else { return nil }
+    return sendButtons[0]
   }
 
   public func submitStagedUnconfirmed() throws {
@@ -1065,7 +1219,6 @@ public struct ChatGPTAccessibility {
     }
 
     try submitStaged(input: input)
-    restoreFocus()
   }
 
   public func send() throws {
@@ -1107,14 +1260,22 @@ public struct ChatGPTAccessibility {
       input: input
     )
 
-    restoreFocus()
-
     guard submitted else {
       throw AccessibilityError.sendNotConfirmed
     }
   }
 
   private func submitStaged(input: AXUIElement) throws {
+    let staged = composerSnapshot(of: input)
+
+    try submitStagedBySendControl()
+
+    if waitsForDraftConsumption(staged, input: input) { return }
+
+    guard interactionPolicy.allowsFocus else {
+      throw AccessibilityError.interactionRequiresFocus
+    }
+
     let focusResult = AXUIElementSetAttributeValue(
       input,
       kAXFocusedAttribute as CFString,
@@ -1126,6 +1287,7 @@ public struct ChatGPTAccessibility {
         focusResult
       )
     }
+    interactionState.didTakeFocus = true
 
     let keySource = CGEventSource(stateID: .hidSystemState)
     CGEvent(
@@ -1138,6 +1300,31 @@ public struct ChatGPTAccessibility {
       virtualKey: 36,
       keyDown: false
     )?.post(tap: .cghidEventTap)
+
+    if waitsForDraftConsumption(staged, input: input) { return }
+
+    guard interactionPolicy.allowsPointer,
+      let sendControl = sendControl(for: input)
+    else {
+      throw AccessibilityError.interactionRequiresPointer
+    }
+
+    try click(sendControl.frame)
+  }
+
+  private func waitsForDraftConsumption(
+    _ staged: ComposerSnapshot,
+    input: AXUIElement
+  ) -> Bool {
+    let deadline = Date().addingTimeInterval(0.35)
+    while Date() < deadline {
+      let composer = composerSnapshot(of: input)
+      if composer.text == nil || composer.isEmpty || composer.text != staged.text {
+        return true
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    return false
   }
 
   private func normalizedComposerText(_ text: String) -> String {
@@ -1149,12 +1336,45 @@ public struct ChatGPTAccessibility {
   }
 
   private func isEditableInput(_ element: AXUIElement) -> Bool {
-    guard let role = stringAttribute(kAXRoleAttribute, of: element) else { return false }
-    return role == kAXTextAreaRole || role == kAXTextFieldRole
+    guard let role = stringAttribute(kAXRoleAttribute, of: element),
+      role == kAXTextAreaRole || role == kAXTextFieldRole
+    else { return false }
+    return isValueAttributeSettable(of: element)
   }
 
   private func editableInput() -> AXUIElement? {
-    descendants(of: application).last(where: isEditableInput)
+    composerInput(in: descendants(of: application))
+  }
+
+  private func composerInput(in elements: [AXUIElement]) -> AXUIElement? {
+    let editableInputs = elements.filter(isEditableInput)
+    let candidates = editableInputs.compactMap { element -> (AXUIElement, CGRect)? in
+      guard let inputFrame = frame(of: element),
+        inputFrame.width > 1, inputFrame.height > 1
+      else { return nil }
+      return (element, inputFrame)
+    }
+
+    if let spatialMatch = candidates.last(where: { _, inputFrame in
+      elements.contains { button in
+        guard stringAttribute(kAXRoleAttribute, of: button) == kAXButtonRole,
+          let buttonFrame = frame(of: button)
+        else { return false }
+        let dx = buttonFrame.midX - inputFrame.midX
+        let dy = buttonFrame.midY - inputFrame.midY
+        return abs(dx) <= inputFrame.width / 2 + 180
+          && abs(dy) <= inputFrame.height / 2 + 120
+          && (isSendButton(button) || isButton(button, containing: "stop"))
+      }
+    })?.0 {
+      return spatialMatch
+    }
+
+    guard !requiresChatMode else { return nil }
+    let textAreas = editableInputs.filter {
+      stringAttribute(kAXRoleAttribute, of: $0) == kAXTextAreaRole
+    }
+    return textAreas.count == 1 ? textAreas[0] : nil
   }
 
   private func waitsForEditableInput() -> AXUIElement? {
@@ -1167,7 +1387,12 @@ public struct ChatGPTAccessibility {
   }
 
   private func isSendButton(_ element: AXUIElement) -> Bool {
-    isButton(element, containing: "send")
+    guard stringAttribute(kAXRoleAttribute, of: element) == kAXButtonRole else { return false }
+    return buttonLabels(of: element).contains { label in
+      ["Send", "Send message"].contains {
+        $0.caseInsensitiveCompare(label) == .orderedSame
+      }
+    }
   }
 
   private func isNewChatButton(_ element: AXUIElement) -> Bool {
@@ -1205,7 +1430,7 @@ public struct ChatGPTAccessibility {
     guard let current = chatModeControl() else {
       throw AccessibilityError.chatModeControlNotFound
     }
-    click(current.frame)
+    try click(current.frame)
   }
 
   private func waitsForChatModeControl() -> (element: AXUIElement, frame: CGRect)? {
@@ -1288,6 +1513,14 @@ public struct ChatGPTAccessibility {
     [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute, kAXValueAttribute].compactMap {
       stringAttribute($0, of: element)
     }
+  }
+
+  private func actionNames(of element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(element, &names) == .success else {
+      return []
+    }
+    return names as? [String] ?? []
   }
 
   private func descendants(of root: AXUIElement, limit: Int = 5_000) -> [AXUIElement] {
@@ -1374,6 +1607,14 @@ public struct ChatGPTAccessibility {
         return true
       }
 
+      // ChatGPT Classic can omit the just-submitted user message from its AX
+      // message structure and can keep exposing Send instead of Stop. Draft
+      // consumption is direct, composer-local evidence that the staged draft
+      // was submitted.
+      if stagedRepresentationConsumed {
+        return true
+      }
+
       RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
 
@@ -1444,12 +1685,15 @@ public struct ChatGPTAccessibility {
     return candidates.map(\.1)
   }
 
-  private func scrollToBottomIfNeeded() {
+  private func scrollToBottomIfNeeded() throws {
     guard let button = visibleScrollToBottomButton() else { return }
-    // The button is present only while the latest messages are outside the
-    // rendered viewport. Its AXPress action is ignored by this ChatGPT build,
-    // so hover and click this one explicit control once.
-    click(button.1)
+    let result = AXUIElementPerformAction(button.0, kAXPressAction as CFString)
+    if result != .success {
+      guard interactionPolicy.allowsPointer else {
+        throw AccessibilityError.writeFailed("press ChatGPT Scroll to bottom", result)
+      }
+      try click(button.1)
+    }
     RunLoop.current.run(until: Date().addingTimeInterval(0.25))
   }
 
@@ -1518,7 +1762,11 @@ public struct ChatGPTAccessibility {
     return CGRect(origin: position, size: size)
   }
 
-  private func click(_ frame: CGRect) {
+  private func click(_ frame: CGRect) throws {
+    guard interactionPolicy.allowsPointer else {
+      throw AccessibilityError.interactionRequiresPointer
+    }
+    interactionState.didTakeFocus = true
     let source = CGEventSource(stateID: .hidSystemState)
     let center = CGPoint(x: frame.midX, y: frame.midY)
     let originalLocation = CGEvent(source: nil)?.location
@@ -1572,6 +1820,15 @@ public struct ChatGPTAccessibility {
     return number.intValue
   }
 
+  private func isValueAttributeSettable(of element: AXUIElement) -> Bool {
+    var settable = DarwinBoolean(false)
+    return AXUIElementIsAttributeSettable(
+      element,
+      kAXValueAttribute as CFString,
+      &settable
+    ) == .success && settable.boolValue
+  }
+
   private func stringAttribute(_ attribute: String, of element: AXUIElement) -> String? {
     var value: CFTypeRef?
     guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
@@ -1607,6 +1864,10 @@ private struct ClipboardSnapshot {
     pasteboard.clearContents()
     if !items.isEmpty { pasteboard.writeObjects(items) }
   }
+}
+
+private final class InteractionState {
+  var didTakeFocus = false
 }
 
 private struct FocusSnapshot {

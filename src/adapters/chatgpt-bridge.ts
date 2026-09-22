@@ -11,6 +11,37 @@ const bridgePath = fileURLToPath(
   new URL("../../.build/debug/chatworks-ax", import.meta.url),
 );
 
+export type ChatGPTApplication = "classic" | "desktop";
+export type InteractionPolicy = "background" | "focus" | "pointer";
+
+const bundleIdentifierForApplication: Record<ChatGPTApplication, string> = {
+  classic: "com.openai.chat",
+  desktop: "com.openai.codex",
+};
+
+let selectedApplication: ChatGPTApplication | undefined;
+let selectedInteractionPolicy: InteractionPolicy = "background";
+
+export function selectChatGPTApplication(
+  application: ChatGPTApplication | undefined,
+): void {
+  selectedApplication = application;
+}
+
+export function selectInteractionPolicy(policy: InteractionPolicy): void {
+  selectedInteractionPolicy = policy;
+}
+
+export function bridgeArguments(arguments_: string[]): string[] {
+  const connectionArguments = ["--interaction", selectedInteractionPolicy];
+  if (selectedApplication)
+    connectionArguments.unshift(
+      "--bundle-id",
+      bundleIdentifierForApplication[selectedApplication],
+    );
+  return [...connectionArguments, ...arguments_];
+}
+
 export class NoAssistantMessageError extends Error {
   constructor() {
     super("No assistant message is available to copy.");
@@ -239,7 +270,7 @@ export function callBridge(
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.env.CHATWORKS_AX_BRIDGE ?? bridgePath,
-      arguments_,
+      bridgeArguments(arguments_),
       {
         stdio: ["pipe", "pipe", "pipe"],
       },
