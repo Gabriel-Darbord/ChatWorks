@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { parseMessage } from "../src/core/message.ts";
-import { createOpenCodeProviderServer } from "../src/providers/opencode-http.ts";
+import { createProviderServer } from "../src/providers/provider-http.ts";
 
 const request = {
   model: "chatworks-classic",
@@ -28,7 +28,7 @@ async function withServer(
 ): Promise<void> {
   const prompts: string[] = [];
   const replies = Array.isArray(reply) ? [...reply] : [reply];
-  const server = createOpenCodeProviderServer({
+  const server = createProviderServer({
     async sendAndRead(prompt) {
       prompts.push(prompt);
       const next = replies.shift();
@@ -56,14 +56,17 @@ test("persists provider lifecycle transitions without request bodies", async () 
   process.env.CHATWORKS_EVENT_LOG = path;
 
   try {
-    await withServer('All set.\n\n```tools\n{"name":"finish","input":{}}\n```', async (url) => {
-      const response = await fetch(`${url}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(request),
-      });
-      assert.equal(response.status, 200);
-    });
+    await withServer(
+      'All set.\n\n```tools\n{"name":"finish","input":{}}\n```',
+      async (url) => {
+        const response = await fetch(`${url}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        });
+        assert.equal(response.status, 200);
+      },
+    );
 
     const text = await readFile(path, "utf8");
     const events = text
@@ -85,23 +88,26 @@ test("persists provider lifecycle transitions without request bodies", async () 
 });
 
 test("serves a non-streaming OpenAI-compatible completion", async () => {
-  await withServer('All set.\n\n```tools\n{"name":"finish","input":{}}\n```', async (url, prompts) => {
-    const response = await fetch(`${url}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
+  await withServer(
+    'All set.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    async (url, prompts) => {
+      const response = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
 
-    assert.equal(response.status, 200);
-    const completion = (await response.json()) as {
-      object: string;
-      choices: Array<{ message: { content: string }; finish_reason: string }>;
-    };
-    assert.equal(completion.object, "chat.completion");
-    assert.equal(completion.choices[0].message.content, "All set.");
-    assert.equal(completion.choices[0].finish_reason, "stop");
-    assert.equal(prompts.length, 1);
-  });
+      assert.equal(response.status, 200);
+      const completion = (await response.json()) as {
+        object: string;
+        choices: Array<{ message: { content: string }; finish_reason: string }>;
+      };
+      assert.equal(completion.object, "chat.completion");
+      assert.equal(completion.choices[0].message.content, "All set.");
+      assert.equal(completion.choices[0].finish_reason, "stop");
+      assert.equal(prompts.length, 1);
+    },
+  );
 });
 
 test("streams tool calls in OpenAI-compatible SSE", async () => {
@@ -161,19 +167,22 @@ test("streams prose-only internal iterations before the final response", async (
 });
 
 test("accepts requests larger than the former 10 MB transport limit", async () => {
-  await withServer('All set.\n\n```tools\n{"name":"finish","input":{}}\n```', async (url, prompts) => {
-    const response = await fetch(`${url}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...request,
-        messages: [{ role: "user", content: "x".repeat(10_000_001) }],
-      }),
-    });
+  await withServer(
+    'All set.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    async (url, prompts) => {
+      const response = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...request,
+          messages: [{ role: "user", content: "x".repeat(10_000_001) }],
+        }),
+      });
 
-    assert.equal(response.status, 200);
-    assert.equal(prompts.length, 1);
-  });
+      assert.equal(response.status, 200);
+      assert.equal(prompts.length, 1);
+    },
+  );
 });
 
 test("reports malformed requests without contacting Classic", async () => {

@@ -1,4 +1,4 @@
-import type { OpenCodeTool } from "./opencode-tools.ts";
+import type { ProviderTool } from "./provider-tools.ts";
 
 type InputFieldTransformation = {
   source: string;
@@ -47,7 +47,7 @@ const transformations: Record<string, ToolTransformation> = {
   },
 };
 
-export function presentOpenCodeTool(tool: OpenCodeTool): OpenCodeTool {
+export function presentOpenCodeTool(tool: ProviderTool): ProviderTool {
   const transformation = transformations[tool.name];
   if (!transformation) return tool;
 
@@ -74,9 +74,9 @@ export function restoreOpenCodeToolInput(
 }
 
 function renameInputField(
-  tool: OpenCodeTool,
+  tool: ProviderTool,
   transformation: InputFieldTransformation,
-): OpenCodeTool {
+): ProviderTool {
   const { source, target, description } = transformation;
   const schema = tool.input?.schema;
   if (!schema) return tool;
@@ -117,6 +117,11 @@ function renameInputField(
     },
   };
 }
+
+export const openCodeToolAdapter = {
+  present: presentOpenCodeTool,
+  restoreInput: restoreOpenCodeToolInput,
+};
 
 function renameRecordField(
   input: Record<string, unknown>,

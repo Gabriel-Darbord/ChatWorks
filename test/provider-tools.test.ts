@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseMessage } from "../src/core/message.ts";
-import { parseOpenCodeToolBlocks } from "../src/providers/opencode-tools.ts";
+import { parseProviderToolBlocks } from "../src/providers/provider-tools.ts";
 
 const tools = [
   { name: "read", input: { required: ["path"] } },
@@ -10,7 +10,7 @@ const tools = [
 ];
 
 test("preserves ordered JSONL tool calls with stable call ids", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage(
       'I will inspect both files.\n\n```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n{"name":"grep","input":{"pattern":"TODO"}}\n```',
     ),
@@ -37,7 +37,7 @@ test("preserves ordered JSONL tool calls with stable call ids", () => {
 });
 
 test("recognizes a tools block even when AX reports prose after it", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage(
       '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```\n\nI will inspect it.',
     ),
@@ -59,7 +59,7 @@ test("recognizes a tools block even when AX reports prose after it", () => {
 });
 
 test("rejects multiple tools blocks", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage(
       '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```\n```tools\n{"name":"grep","input":{"pattern":"TODO"}}\n```',
     ),
@@ -73,7 +73,7 @@ test("rejects multiple tools blocks", () => {
 
 test("returns ordinary assistant text without a tool delimiter", () => {
   assert.deepEqual(
-    parseOpenCodeToolBlocks(
+    parseProviderToolBlocks(
       parseMessage("The change is complete."),
       tools,
       "turn_8",
@@ -83,7 +83,7 @@ test("returns ordinary assistant text without a tool delimiter", () => {
 });
 
 test("repairs a non-tool block alongside tool calls", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage(
       'I found the issue.\n\n```ts\nconst answer = 42;\n```\n\n```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```',
     ),
@@ -97,7 +97,7 @@ test("repairs a non-tool block alongside tool calls", () => {
 });
 
 test("allows prose alongside the single tools block", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage(
       'I found the issue.\n\n```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```\n\nI will inspect the file.',
     ),
@@ -119,7 +119,7 @@ test("allows prose alongside the single tools block", () => {
 });
 
 test("does not interpret closing-fence text inside tool JSON", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage('````tools\n{"name":"grep","input":{"pattern":"```"}}\n````'),
     tools,
     "turn_8c",
@@ -130,7 +130,7 @@ test("does not interpret closing-fence text inside tool JSON", () => {
 });
 
 test("repairs malformed JSONL without accepting a valid prefix", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage(
       '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n{"name":"grep","input":[]}\n```',
     ),
@@ -144,7 +144,7 @@ test("repairs malformed JSONL without accepting a valid prefix", () => {
 });
 
 test("repairs missing required input with a minimal replacement", () => {
-  const result = parseOpenCodeToolBlocks(
+  const result = parseProviderToolBlocks(
     parseMessage('```tools\n{"name":"read","input":{}}\n```'),
     tools,
     "turn_10",

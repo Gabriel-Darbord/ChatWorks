@@ -1,10 +1,10 @@
 import { messageText, type Message } from "../core/message.ts";
 import {
-  presentOpenCodeTool,
-  restoreOpenCodeToolInput,
-} from "./opencode-tool-transformations.ts";
+  identityProviderToolAdapter,
+  type ProviderToolAdapter,
+} from "./provider-tool-adapter.ts";
 
-export type OpenCodeTool = {
+export type ProviderTool = {
   name: string;
   description?: string;
   input?: {
@@ -39,10 +39,11 @@ type ToolEnvelope = {
   input?: unknown;
 };
 
-export function parseOpenCodeToolBlocks(
+export function parseProviderToolBlocks(
   message: Message,
-  tools: OpenCodeTool[],
+  tools: ProviderTool[],
   providerTurn: string,
+  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
 ): ToolProtocolResult {
   const parts = [...message.parts];
 
@@ -103,7 +104,7 @@ export function parseOpenCodeToolBlocks(
       exampleFor(tools[0]),
     );
 
-  const presentedTools = tools.map(presentOpenCodeTool);
+  const presentedTools = tools.map(toolAdapter.present);
   const available = new Map(presentedTools.map((tool) => [tool.name, tool]));
   const calls: ProviderToolCall[] = [];
 
@@ -123,7 +124,7 @@ export function parseOpenCodeToolBlocks(
     calls.push({
       id: `chatworks_${providerTurn}_${index + 1}`,
       name: parsed.name,
-      input: restoreOpenCodeToolInput(parsed.name, parsed.input),
+      input: toolAdapter.restoreInput(parsed.name, parsed.input),
     });
   }
 
@@ -133,7 +134,7 @@ export function parseOpenCodeToolBlocks(
 function parseEnvelope(
   source: string,
   index: number,
-  tools: OpenCodeTool[],
+  tools: ProviderTool[],
 ):
   | { kind: "ok"; name: string; input: Record<string, unknown> }
   | Extract<ToolProtocolResult, { kind: "repair" }> {
@@ -180,7 +181,7 @@ function parseEnvelope(
 function repairUnknownTool(
   index: number,
   name: string,
-  tools: OpenCodeTool[],
+  tools: ProviderTool[],
 ): Extract<ToolProtocolResult, { kind: "repair" }> {
   const names =
     tools.map((tool) => `\`${tool.name}\``).join(", ") || "no tools";
@@ -193,7 +194,7 @@ function repairUnknownTool(
 
 function repairMissingInput(
   index: number,
-  tool: OpenCodeTool,
+  tool: ProviderTool,
   field: string,
 ): Extract<ToolProtocolResult, { kind: "repair" }> {
   return repair(
@@ -215,7 +216,7 @@ function repair(
 }
 
 function exampleFor(
-  tool: OpenCodeTool | undefined,
+  tool: ProviderTool | undefined,
   requiredField?: string,
 ): string {
   if (!tool) return '{"name":"tool-name","input":{}}';

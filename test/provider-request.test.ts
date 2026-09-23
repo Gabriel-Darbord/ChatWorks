@@ -3,11 +3,11 @@ import test from "node:test";
 
 import {
   compileClassicTurn,
-  decodeOpenCodeProviderRequest,
-} from "../src/providers/opencode-request.ts";
+  decodeProviderRequest,
+} from "../src/providers/provider-request.ts";
 
 test("compiles the current request, active tool schemas, and newest context", () => {
-  const request = decodeOpenCodeProviderRequest({
+  const request = decodeProviderRequest({
     model: "chatworks-classic",
     messages: [
       { role: "system", content: "Work carefully." },
@@ -52,7 +52,7 @@ test("compiles the current request, active tool schemas, and newest context", ()
 });
 
 test("uses only compact tool discovery after the initial turn", () => {
-  const request = decodeOpenCodeProviderRequest({
+  const request = decodeProviderRequest({
     model: "chatworks",
     messages: [
       { role: "user", content: "Inspect the project." },
@@ -82,7 +82,7 @@ test("repeats agent instructions only when estimated conversation tokens cross t
   const system = { role: "system", content: "Persistent instructions." };
   const tools: unknown[] = [];
 
-  const belowInterval = decodeOpenCodeProviderRequest({
+  const belowInterval = decodeProviderRequest({
     model: "chatworks",
     messages: [
       system,
@@ -97,11 +97,11 @@ test("repeats agent instructions only when estimated conversation tokens cross t
     /Persistent instructions/,
   );
 
-  const crossingInterval = decodeOpenCodeProviderRequest({
+  const crossingInterval = decodeProviderRequest({
     model: "chatworks",
     messages: [
       system,
-      { role: "user", content: "x".repeat(47_990) },
+      { role: "user", content: "x".repeat(1_087_900) },
       { role: "assistant", content: "response" },
       { role: "user", content: "x".repeat(100) },
     ],
@@ -114,7 +114,7 @@ test("repeats agent instructions only when estimated conversation tokens cross t
 });
 
 test("renders tool descriptions with their original line breaks", () => {
-  const request = decodeOpenCodeProviderRequest({
+  const request = decodeProviderRequest({
     model: "chatworks",
     messages: [{ role: "user", content: "Inspect the project." }],
     tools: [
@@ -134,7 +134,7 @@ test("renders tool descriptions with their original line breaks", () => {
 });
 
 test("accepts OpenAI text-content arrays", () => {
-  const request = decodeOpenCodeProviderRequest({
+  const request = decodeProviderRequest({
     model: "chatworks-classic",
     messages: [
       {
@@ -154,7 +154,7 @@ test("accepts OpenAI text-content arrays", () => {
 });
 
 test("preserves a tool result followed by a steering user message", () => {
-  const request = decodeOpenCodeProviderRequest({
+  const request = decodeProviderRequest({
     model: "chatworks",
     messages: [
       { role: "user", content: "Go" },
@@ -172,7 +172,7 @@ test("preserves a tool result followed by a steering user message", () => {
 });
 
 test("preserves every result in a batched tool response", () => {
-  const request = decodeOpenCodeProviderRequest({
+  const request = decodeProviderRequest({
     model: "chatworks-classic",
     messages: [
       { role: "user", content: "Inspect these files." },
@@ -193,7 +193,7 @@ test("preserves every result in a batched tool response", () => {
 test("rejects an unsupported content part with an actionable error", () => {
   assert.throws(
     () =>
-      decodeOpenCodeProviderRequest({
+      decodeProviderRequest({
         model: "chatworks-classic",
         messages: [
           { role: "user", content: [{ type: "image", image_url: "..." }] },
@@ -206,7 +206,7 @@ test("rejects an unsupported content part with an actionable error", () => {
 test("rejects malformed tool schemas before contacting Classic", () => {
   assert.throws(
     () =>
-      decodeOpenCodeProviderRequest({
+      decodeProviderRequest({
         model: "chatworks-classic",
         messages: [{ role: "user", content: "Read a file." }],
         tools: [

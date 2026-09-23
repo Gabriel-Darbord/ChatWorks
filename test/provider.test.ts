@@ -3,10 +3,10 @@ import test from "node:test";
 
 import { parseMessage } from "../src/core/message.ts";
 import {
-  completeOpenCodeRequest,
-  createOpenCodeProviderState,
+  completeProviderRequest,
+  createProviderState,
   type ClassicProviderGateway,
-} from "../src/providers/opencode-provider.ts";
+} from "../src/providers/provider.ts";
 
 const request = {
   model: "chatworks-classic",
@@ -45,7 +45,7 @@ test("maps ordered Classic tool blocks to an OpenAI completion", async () => {
     'I will inspect it.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
   );
 
-  const result = await completeOpenCodeRequest(request, fixture.gateway);
+  const result = await completeProviderRequest(request, fixture.gateway);
 
   assert.equal(fixture.prompts.length, 1);
   assert.equal(result.object, "chat.completion");
@@ -62,11 +62,11 @@ test("maps ordered Classic tool blocks to an OpenAI completion", async () => {
   );
 });
 
-test("returns a Classic-generated OpenCode title", async () => {
+test("returns a Classic-generated client title", async () => {
   const fixture = gateway(
     'Available tools overview\n\n```tools\n{"name":"finish","input":{}}\n```',
   );
-  const result = await completeOpenCodeRequest(
+  const result = await completeProviderRequest(
     {
       model: "chatworks",
       messages: [
@@ -97,7 +97,7 @@ test("serves the full tool catalog through listtools", async () => {
     '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
   );
 
-  const result = await completeOpenCodeRequest(
+  const result = await completeProviderRequest(
     {
       ...request,
       messages: [
@@ -123,7 +123,7 @@ test("composes listtools with surrounding real tool calls", async () => {
     '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n{"name":"listtools","input":{}}\n{"name":"read","input":{"path":"src/b.ts"}}\n```',
     'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
   );
-  const state = createOpenCodeProviderState();
+  const state = createProviderState();
   const continuedRequest = {
     ...request,
     messages: [
@@ -133,7 +133,7 @@ test("composes listtools with surrounding real tool calls", async () => {
     ],
   };
 
-  const first = await completeOpenCodeRequest(
+  const first = await completeProviderRequest(
     continuedRequest,
     fixture.gateway,
     undefined,
@@ -147,7 +147,7 @@ test("composes listtools with surrounding real tool calls", async () => {
     ["read", "read"],
   );
 
-  const second = await completeOpenCodeRequest(
+  const second = await completeProviderRequest(
     {
       ...continuedRequest,
       messages: [
@@ -182,7 +182,7 @@ test("finishes internally with prose as the final response", async () => {
     'Implementation complete.\n\n```tools\n{"name":"finish","input":{}}\n```',
   );
 
-  const result = await completeOpenCodeRequest(request, fixture.gateway);
+  const result = await completeProviderRequest(request, fixture.gateway);
 
   assert.equal(result.choices[0].message.content, "Implementation complete.");
   assert.equal(result.choices[0].message.tool_calls, undefined);
@@ -192,7 +192,7 @@ test("finishes internally with prose as the final response", async () => {
 test("allows finish with an empty final response", async () => {
   const fixture = gateway('```tools\n{"name":"finish","input":{}}\n```');
 
-  const result = await completeOpenCodeRequest(request, fixture.gateway);
+  const result = await completeProviderRequest(request, fixture.gateway);
 
   assert.equal(result.choices[0].message.content, "");
   assert.equal(result.choices[0].finish_reason, "stop");
@@ -205,7 +205,7 @@ test("continues internally when Classic returns prose without finish", async () 
   );
 
   const intermediate: string[] = [];
-  const result = await completeOpenCodeRequest(
+  const result = await completeProviderRequest(
     request,
     fixture.gateway,
     undefined,
@@ -225,9 +225,9 @@ test("ignores finish alongside another tool and executes the other tool", async 
     'Still checking.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n{"name":"finish","input":{}}\n```',
     'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
   );
-  const state = createOpenCodeProviderState();
+  const state = createProviderState();
 
-  const first = await completeOpenCodeRequest(
+  const first = await completeProviderRequest(
     request,
     fixture.gateway,
     undefined,
@@ -242,7 +242,7 @@ test("ignores finish alongside another tool and executes the other tool", async 
     ["read"],
   );
 
-  const second = await completeOpenCodeRequest(
+  const second = await completeProviderRequest(
     {
       ...request,
       messages: [
@@ -271,7 +271,7 @@ test("ignores finish alongside listtools and serves the catalog", async () => {
     'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
   );
 
-  const result = await completeOpenCodeRequest(request, fixture.gateway);
+  const result = await completeProviderRequest(request, fixture.gateway);
 
   assert.equal(fixture.prompts.length, 2);
   assert.match(fixture.prompts[1], /Full tool catalog requested/);
@@ -285,7 +285,7 @@ test("repairs an invalid block before returning a response", async () => {
     '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
   );
 
-  const result = await completeOpenCodeRequest(request, fixture.gateway);
+  const result = await completeProviderRequest(request, fixture.gateway);
 
   assert.equal(fixture.prompts.length, 2);
   assert.match(fixture.prompts[1], /Tool request 1 was rejected/);
@@ -300,7 +300,7 @@ test("fails after two bounded repair turns", async () => {
   );
 
   await assert.rejects(
-    completeOpenCodeRequest(request, fixture.gateway),
+    completeProviderRequest(request, fixture.gateway),
     /after 2 repairs/,
   );
   assert.equal(fixture.prompts.length, 3);

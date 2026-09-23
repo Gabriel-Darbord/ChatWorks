@@ -12,7 +12,7 @@ import {
 } from "../core/assistant-observation.ts";
 import { logDebug } from "../core/diagnostics.ts";
 import { messageText } from "../core/message.ts";
-import type { ClassicProviderGateway } from "./opencode-provider.ts";
+import type { ClassicProviderGateway } from "./provider.ts";
 
 export type ClassicProviderOperations = {
   observeAssistant(): Promise<AssistantObservation | undefined>;

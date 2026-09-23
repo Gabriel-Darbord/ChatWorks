@@ -3,14 +3,18 @@ import { messageText, type Message } from "../core/message.ts";
 import { logDebug } from "../core/diagnostics.ts";
 import {
   compileClassicTurn,
-  decodeOpenCodeProviderRequest,
+  decodeProviderRequest,
   formatTools,
-  type OpenCodeProviderRequest,
-} from "./opencode-request.ts";
+  type ProviderRequest,
+} from "./provider-request.ts";
 import {
-  parseOpenCodeToolBlocks,
+  identityProviderToolAdapter,
+  type ProviderToolAdapter,
+} from "./provider-tool-adapter.ts";
+import {
+  parseProviderToolBlocks,
   type ToolProtocolResult,
-} from "./opencode-tools.ts";
+} from "./provider-tools.ts";
 
 const repairLimit = 2;
 const internalToolInput = {
@@ -35,12 +39,12 @@ export type ClassicProviderGateway = {
   sendAndRead(prompt: string, correlationId?: string): Promise<Message>;
 };
 
-export type OpenCodeProviderState = {
+export type ProviderState = {
   pendingToolCatalogs: Map<string, string>;
   pendingInternalResults: Map<string, string>;
 };
 
-export function createOpenCodeProviderState(): OpenCodeProviderState {
+export function createProviderState(): ProviderState {
   return {
     pendingToolCatalogs: new Map(),
     pendingInternalResults: new Map(),
@@ -67,14 +71,15 @@ export type OpenAICompletion = {
   }>;
 };
 
-export async function completeOpenCodeRequest(
+export async function completeProviderRequest(
   value: unknown,
   gateway: ClassicProviderGateway,
   correlationId?: string,
-  state: OpenCodeProviderState = createOpenCodeProviderState(),
+  state: ProviderState = createProviderState(),
   onIntermediate?: (text: string) => void,
+  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
 ): Promise<OpenAICompletion> {
-  const request = decodeOpenCodeProviderRequest(value);
+  const request = decodeProviderRequest(value);
   const turn = providerTurnId(request);
   const pendingCatalogs = request.messages.flatMap((message) => {
     if (!message.toolCallId) return [];
@@ -90,10 +95,12 @@ export async function completeOpenCodeRequest(
     state.pendingInternalResults.delete(message.toolCallId);
     return [internalResult];
   });
-  const compiled = compileClassicTurn(request, undefined, [
-    ...new Set(pendingCatalogs),
-    ...new Set(pendingInternalResults),
-  ]);
+  const compiled = compileClassicTurn(
+    request,
+    undefined,
+    [...new Set(pendingCatalogs), ...new Set(pendingInternalResults)],
+    toolAdapter,
+  );
   let prompt = compiled.prompt;
 
   for (let repairCount = 0; repairCount <= repairLimit; repairCount += 1) {
@@ -109,10 +116,11 @@ export async function completeOpenCodeRequest(
       fields: { message: messageText(message), repairCount },
     });
 
-    const result = parseOpenCodeToolBlocks(
+    const result = parseProviderToolBlocks(
       message,
       [...compiled.tools, listToolsTool, finishTool],
       turn,
+      toolAdapter,
     );
 
     if (result.kind === "text") {
@@ -151,7 +159,7 @@ export async function completeOpenCodeRequest(
           (call) => call.name !== "listtools",
         );
         const catalog = requestedCatalog
-          ? `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`
+          ? `Full tool catalog requested:\n\n${formatTools(compiled.tools, toolAdapter)}`
           : undefined;
 
         if (realCalls.length === 0) {
@@ -175,7 +183,7 @@ export async function completeOpenCodeRequest(
       );
 
       if (requestedCatalog) {
-        const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`;
+        const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools, toolAdapter)}`;
         const realCalls = result.calls.filter(
           (call) => call.name !== "listtools",
         );
@@ -209,10 +217,10 @@ export async function completeOpenCodeRequest(
     prompt = result.message;
   }
 
-  throw new Error("Unreachable OpenCode provider repair state.");
+  throw new Error("Unreachable provider repair state.");
 }
 
-function providerTurnId(request: OpenCodeProviderRequest): string {
+function providerTurnId(request: ProviderRequest): string {
   const payload = JSON.stringify(request);
   return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }

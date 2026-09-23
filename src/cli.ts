@@ -55,8 +55,9 @@ import { withTurnCheckpoint } from "./core/checkpoint.ts";
 import { formatTodos, TodoStore } from "./core/todos.ts";
 import { messageRequestsAbort } from "./core/chatworks-language.ts";
 import { classicProviderGateway } from "./providers/classic-gateway.ts";
-import { createOpenCodeProviderServer } from "./providers/opencode-http.ts";
-import { parseOpenCodeServeOptions } from "./providers/opencode-serve.ts";
+import { createProviderServer } from "./providers/provider-http.ts";
+import { parseProviderServeOptions } from "./providers/provider-serve.ts";
+import { openCodeToolAdapter } from "./providers/opencode-tool-adapter.ts";
 
 const pollMilliseconds = 1_000;
 const usage = `Usage:
@@ -75,7 +76,7 @@ const usage = `Usage:
   npm start -- participant list      List ChatWorks participants.
   npm start -- participant create <id> <role...>
   npm start -- --app <application> provider serve --chat <exact title>
-                                      Expose one selected ChatGPT chat as a local OpenCode provider.
+                                      Expose one selected ChatGPT chat as a local OpenAI-compatible provider.
                                       Create and initialize a ChatWorks participant.
   npm start -- inspect [label...]    Inspect read-only accessibility controls for maintenance.
   npm start -- discuss <chat...>     Relay the first chat's latest assistant message through participants.
@@ -612,18 +613,21 @@ async function runProvider(
     throw new Error("provider serve requires --app classic or --app desktop.");
   }
 
-  const options = parseOpenCodeServeOptions(rest);
+  const options = parseProviderServeOptions(rest);
   if (options.chat !== "current") {
     await callBridge(["select-chat", options.chat]);
   }
 
-  const server = createOpenCodeProviderServer(classicProviderGateway());
+  const server = createProviderServer(
+    classicProviderGateway(),
+    openCodeToolAdapter,
+  );
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(options.port, "127.0.0.1", resolve);
   });
   console.log(
-    `ChatWorks OpenCode provider is bound to '${options.chat}' at http://127.0.0.1:${options.port}/v1. Press Ctrl-C to stop.`,
+    `ChatWorks OpenAI-compatible provider is bound to '${options.chat}' at http://127.0.0.1:${options.port}/v1. Press Ctrl-C to stop.`,
   );
 
   await new Promise<void>((resolve) => {

@@ -5,21 +5,26 @@ import {
   type ServerResponse,
 } from "node:http";
 import {
-  completeOpenCodeRequest,
-  createOpenCodeProviderState,
+  completeProviderRequest,
+  createProviderState,
   type ClassicProviderGateway,
   type OpenAICompletion,
-} from "./opencode-provider.ts";
+} from "./provider.ts";
+import {
+  identityProviderToolAdapter,
+  type ProviderToolAdapter,
+} from "./provider-tool-adapter.ts";
 import { logDebug, logError, logEvent } from "../core/diagnostics.ts";
 
 const maxRequestBytes = 100_000_000;
 
-export function createOpenCodeProviderServer(
+export function createProviderServer(
   gateway: ClassicProviderGateway,
+  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
 ): Server {
   let pending = Promise.resolve();
   let requestCount = 0;
-  const providerState = createOpenCodeProviderState();
+  const providerState = createProviderState();
   const complete = <T>(work: () => Promise<T>): Promise<T> => {
     const result = pending.then(work, work);
     pending = result.then(
@@ -65,7 +70,7 @@ export function createOpenCodeProviderServer(
           requestBytes: Number(request.headers["content-length"] ?? 0),
         },
       });
-      await logDebug("provider", "opencode-input", {
+      await logDebug("provider", "client-input", {
         correlationId,
         fields: { body: JSON.stringify(body) },
       });
@@ -77,7 +82,7 @@ export function createOpenCodeProviderServer(
           correlationId,
           fields: { queueMs: Date.now() - startedAt },
         });
-        return completeOpenCodeRequest(
+        return completeProviderRequest(
           body,
           gateway,
           correlationId,
@@ -85,9 +90,10 @@ export function createOpenCodeProviderServer(
           streaming
             ? (text) => writeIntermediateChunk(response, body, text)
             : undefined,
+          toolAdapter,
         );
       });
-      await logDebug("provider", "opencode-output", {
+      await logDebug("provider", "client-output", {
         correlationId,
         fields: { completion: JSON.stringify(completion) },
       });

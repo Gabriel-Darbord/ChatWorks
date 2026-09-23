@@ -1,21 +1,22 @@
-import { presentOpenCodeTool } from "./opencode-tool-transformations.ts";
-import type { OpenCodeTool } from "./opencode-tools.ts";
+import type { ProviderToolAdapter } from "./provider-tool-adapter.ts";
+import { identityProviderToolAdapter } from "./provider-tool-adapter.ts";
+import type { ProviderTool } from "./provider-tools.ts";
 
-export type OpenCodeChatMessage = {
+export type ProviderChatMessage = {
   role: "system" | "developer" | "user" | "assistant" | "tool";
   text: string;
   toolCallId?: string;
 };
 
-export type OpenCodeProviderRequest = {
+export type ProviderRequest = {
   model: string;
-  messages: OpenCodeChatMessage[];
-  tools: OpenCodeTool[];
+  messages: ProviderChatMessage[];
+  tools: ProviderTool[];
 };
 
 export type CompiledClassicTurn = {
   prompt: string;
-  tools: OpenCodeTool[];
+  tools: ProviderTool[];
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -23,11 +24,9 @@ type UnknownRecord = Record<string, unknown>;
 /**
  * Decode the small OpenAI-compatible request surface ChatWorks consumes.
  * Rejecting unknown content shapes keeps the Classic prompt from silently
- * dropping agent context when OpenCode changes its transport.
+ * dropping agent context when a client changes its transport.
  */
-export function decodeOpenCodeProviderRequest(
-  value: unknown,
-): OpenCodeProviderRequest {
+export function decodeProviderRequest(value: unknown): ProviderRequest {
   const request = record(value, "Chat completion request");
   const model = string(request.model, "Chat completion request model");
   const messages = array(
@@ -51,9 +50,10 @@ export function decodeOpenCodeProviderRequest(
 const agentInstructionsTokenInterval = 272_000; // Based on GPT-5.6 context size
 
 export function compileClassicTurn(
-  request: OpenCodeProviderRequest,
+  request: ProviderRequest,
   includeToolCatalog = isInitialTurn(request.messages),
   internalToolResults: string[] = [],
+  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
 ): CompiledClassicTurn {
   const { toolResults, update } = newestConversationUpdate(request.messages);
   const system = request.messages.filter(
@@ -77,7 +77,7 @@ export function compileClassicTurn(
       "- Only call tools listed under Active tools.",
     ].join("\n"),
     includeToolCatalog
-      ? formatSection("Active tools", formatTools(request.tools))
+      ? formatSection("Active tools", formatTools(request.tools, toolAdapter))
       : formatSection("Active tools", formatCompactTools(request.tools)),
   ];
 
@@ -101,7 +101,7 @@ export function compileClassicTurn(
   return { prompt: sections.join("\n\n"), tools: request.tools };
 }
 
-function decodeMessage(value: unknown, index: number): OpenCodeChatMessage {
+function decodeMessage(value: unknown, index: number): ProviderChatMessage {
   const message = record(value, `Chat completion message ${index + 1}`);
   const role = message.role;
   if (
@@ -134,7 +134,7 @@ function decodeMessage(value: unknown, index: number): OpenCodeChatMessage {
   };
 }
 
-function decodeTools(value: unknown): OpenCodeTool[] {
+function decodeTools(value: unknown): ProviderTool[] {
   return array(value, "Chat completion tools").map((candidate, index) => {
     const tool = record(candidate, `Chat completion tool ${index + 1}`);
     if (tool.type !== "function") {
@@ -210,7 +210,7 @@ function decodeContent(value: unknown, label: string): string {
   throw new Error(`${label} content must be text.`);
 }
 
-function newestConversationUpdate(messages: OpenCodeChatMessage[]): {
+function newestConversationUpdate(messages: ProviderChatMessage[]): {
   toolResults: string;
   update: string;
 } {
@@ -241,11 +241,14 @@ function newestConversationUpdate(messages: OpenCodeChatMessage[]): {
   };
 }
 
-export function formatTools(tools: OpenCodeTool[]): string {
+export function formatTools(
+  tools: ProviderTool[],
+  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
+): string {
   if (tools.length === 0) return "No tools are available for this turn.";
 
   return tools
-    .map(presentOpenCodeTool)
+    .map(toolAdapter.present)
     .map((tool) => {
       const sections = [`name: ${tool.name}`];
       if (tool.description) sections.push(`description:\n${tool.description}`);
@@ -259,19 +262,19 @@ export function formatTools(tools: OpenCodeTool[]): string {
     .join("\n\n");
 }
 
-function formatCompactTools(tools: OpenCodeTool[]): string {
+function formatCompactTools(tools: ProviderTool[]): string {
   if (tools.length === 0) return "No tools are available for this turn.";
   return `Available tool names: ${tools.map((tool) => tool.name).join(", ")}. If you need the full tool definitions and input schemas, call listtools with an empty input object.`;
 }
 
-function isInitialTurn(messages: OpenCodeChatMessage[]): boolean {
+function isInitialTurn(messages: ProviderChatMessage[]): boolean {
   return !messages.some(
     (message) => message.role === "assistant" || message.role === "tool",
   );
 }
 
 function shouldIncludeAgentInstructions(
-  messages: OpenCodeChatMessage[],
+  messages: ProviderChatMessage[],
 ): boolean {
   if (isInitialTurn(messages)) return true;
 
@@ -288,7 +291,7 @@ function shouldIncludeAgentInstructions(
   );
 }
 
-function newestTurnStart(messages: OpenCodeChatMessage[]): number {
+function newestTurnStart(messages: ProviderChatMessage[]): number {
   if (messages.at(-1)?.role === "tool") {
     let index = messages.length - 1;
     while (index > 0 && messages[index - 1].role === "tool") index -= 1;
@@ -297,7 +300,7 @@ function newestTurnStart(messages: OpenCodeChatMessage[]): number {
   return Math.max(0, messages.length - 1);
 }
 
-function estimateTokens(messages: OpenCodeChatMessage[]): number {
+function estimateTokens(messages: ProviderChatMessage[]): number {
   const characters = messages.reduce(
     (total, message) => total + message.text.length,
     0,

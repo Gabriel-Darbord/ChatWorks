@@ -1,13 +1,13 @@
-export type OpenCodeServeOptions = {
+export type ProviderServeOptions = {
   chat: string;
   port: number;
 };
 
 const defaultPort = 32_123;
 
-export function parseOpenCodeServeOptions(
+export function parseProviderServeOptions(
   arguments_: string[],
-): OpenCodeServeOptions {
+): ProviderServeOptions {
   let chat: string | undefined;
   let port = defaultPort;
 
