@@ -48,7 +48,7 @@ export function decodeOpenCodeProviderRequest(
   };
 }
 
-const agentInstructionsTokenInterval = 12_000;
+const agentInstructionsTokenInterval = 272_000; // Based on GPT-5.6 context size
 
 export function compileClassicTurn(
   request: OpenCodeProviderRequest,
@@ -64,8 +64,10 @@ export function compileClassicTurn(
   const sections = [
     [
       "You are the model for one coding-agent turn.",
-      "You have access to the tools listed under Active tools. Invoke them by writing tool calls in a fenced `tools` block. The fenced block is the tool-calling interface: it is intercepted, executed, and the results are returned to you in a subsequent turn. Do not require or look for any other tool-calling mechanism. If an operation can be performed with an Active tool, use that tool rather than claiming that you cannot access or operate on the environment.",
-      "For tasks that require investigation, implementation, verification, or any other operation, keep using tools until the user's request is complete or you are genuinely blocked by information or action only the user can provide. A response without a tool call ends the coding-agent turn, so do not give a tool-free response while another available tool call could materially advance the task. Partial findings, an intermediate result, or knowing the next step are not reasons to stop.",
+      "Work on the user's request across as many internal turns as needed. Continue reasoning, investigating, implementing, and verifying until the task is complete or further progress requires information or action only the user can provide. Partial findings, intermediate results, or knowing the next step are not reasons to stop.",
+      "You have access to the tools listed under Active tools. Invoke them by writing tool calls in a fenced `tools` block. The fenced block is the tool-calling interface: it is intercepted, executed, and the results are returned to you in a subsequent turn. Use tools whenever they can materially advance the task. Do not require or look for any other tool-calling mechanism, and do not claim that you cannot access or operate on the environment when an Active tool provides that capability.",
+      "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish` with an empty input object. The prose alongside `finish` is returned to the user as the final response. Summarize the work performed, important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.",
+      "A response without `finish` does not end the coding-agent turn. If no tool call is appropriate yet, continue reasoning about the task rather than stopping prematurely. Do not call `finish` alongside another tool.",
       "When using tools:",
       "- Emit exactly one fenced `tools` block in that response.",
       "- Do not use any other fenced blocks in that response.",
@@ -118,9 +120,9 @@ function decodeMessage(value: unknown, index: number): OpenCodeChatMessage {
     message.tool_call_id === undefined
       ? undefined
       : string(
-        message.tool_call_id,
-        `Chat completion message ${index + 1} tool call id`,
-      );
+          message.tool_call_id,
+          `Chat completion message ${index + 1} tool call id`,
+        );
 
   return {
     role,
@@ -151,16 +153,16 @@ function decodeTools(value: unknown): OpenCodeTool[] {
       definition.description === undefined
         ? undefined
         : string(
-          definition.description,
-          `Chat completion tool ${index + 1} function description`,
-        );
+            definition.description,
+            `Chat completion tool ${index + 1} function description`,
+          );
     const parameters =
       definition.parameters === undefined
         ? undefined
         : record(
-          definition.parameters,
-          `Chat completion tool ${index + 1} parameters`,
-        );
+            definition.parameters,
+            `Chat completion tool ${index + 1} parameters`,
+          );
     const required = parameters?.required;
     if (
       required !== undefined &&
@@ -177,11 +179,11 @@ function decodeTools(value: unknown): OpenCodeTool[] {
       ...(description ? { description } : {}),
       ...(parameters
         ? {
-          input: {
-            ...(Array.isArray(required) ? { required } : {}),
-            schema: parameters,
-          },
-        }
+            input: {
+              ...(Array.isArray(required) ? { required } : {}),
+              schema: parameters,
+            },
+          }
         : {}),
     };
   });

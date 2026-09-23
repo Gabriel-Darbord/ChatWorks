@@ -23,14 +23,17 @@ const request = {
 };
 
 async function withServer(
-  reply: string,
+  reply: string | string[],
   run: (url: string, prompts: string[]) => Promise<void>,
 ): Promise<void> {
   const prompts: string[] = [];
+  const replies = Array.isArray(reply) ? [...reply] : [reply];
   const server = createOpenCodeProviderServer({
     async sendAndRead(prompt) {
       prompts.push(prompt);
-      return parseMessage(reply);
+      const next = replies.shift();
+      if (next === undefined) throw new Error("Unexpected provider read.");
+      return parseMessage(next);
     },
   });
   server.listen(0, "127.0.0.1");
@@ -53,7 +56,7 @@ test("persists provider lifecycle transitions without request bodies", async () 
   process.env.CHATWORKS_EVENT_LOG = path;
 
   try {
-    await withServer("All set.", async (url) => {
+    await withServer('All set.\n\n```tools\n{"name":"finish","input":{}}\n```', async (url) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -82,7 +85,7 @@ test("persists provider lifecycle transitions without request bodies", async () 
 });
 
 test("serves a non-streaming OpenAI-compatible completion", async () => {
-  await withServer("All set.", async (url, prompts) => {
+  await withServer('All set.\n\n```tools\n{"name":"finish","input":{}}\n```', async (url, prompts) => {
     const response = await fetch(`${url}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -128,8 +131,37 @@ test("streams tool calls in OpenAI-compatible SSE", async () => {
   );
 });
 
+test("streams prose-only internal iterations before the final response", async () => {
+  await withServer(
+    [
+      "Partial finding.",
+      'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    ],
+    async (url, prompts) => {
+      const response = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...request, stream: true }),
+      });
+
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      const intermediateIndex = body.indexOf('"content":"Partial finding."');
+      const finalIndex = body.indexOf('"content":"Done."');
+      assert.ok(intermediateIndex >= 0);
+      assert.ok(intermediateIndex < finalIndex);
+      assert.match(
+        body,
+        /"content":"Partial finding\."[^\n]*"finish_reason":null/,
+      );
+      assert.match(body, /"finish_reason":"stop"/);
+      assert.equal(prompts.length, 2);
+    },
+  );
+});
+
 test("accepts requests larger than the former 10 MB transport limit", async () => {
-  await withServer("All set.", async (url, prompts) => {
+  await withServer('All set.\n\n```tools\n{"name":"finish","input":{}}\n```', async (url, prompts) => {
     const response = await fetch(`${url}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },

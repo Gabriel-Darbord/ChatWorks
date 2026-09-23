@@ -13,15 +13,22 @@ import {
 } from "./opencode-tools.ts";
 
 const repairLimit = 2;
+const internalToolInput = {
+  schema: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+};
+
 const listToolsTool = {
   name: "listtools",
-  input: {
-    schema: {
-      type: "object",
-      properties: {},
-      additionalProperties: false,
-    },
-  },
+  input: internalToolInput,
+};
+
+const finishTool = {
+  name: "finish",
+  input: internalToolInput,
 };
 
 export type ClassicProviderGateway = {
@@ -30,10 +37,14 @@ export type ClassicProviderGateway = {
 
 export type OpenCodeProviderState = {
   pendingToolCatalogs: Map<string, string>;
+  pendingInternalResults: Map<string, string>;
 };
 
 export function createOpenCodeProviderState(): OpenCodeProviderState {
-  return { pendingToolCatalogs: new Map() };
+  return {
+    pendingToolCatalogs: new Map(),
+    pendingInternalResults: new Map(),
+  };
 }
 
 export type OpenAICompletion = {
@@ -61,6 +72,7 @@ export async function completeOpenCodeRequest(
   gateway: ClassicProviderGateway,
   correlationId?: string,
   state: OpenCodeProviderState = createOpenCodeProviderState(),
+  onIntermediate?: (text: string) => void,
 ): Promise<OpenAICompletion> {
   const request = decodeOpenCodeProviderRequest(value);
   const turn = providerTurnId(request);
@@ -71,8 +83,16 @@ export async function completeOpenCodeRequest(
     state.pendingToolCatalogs.delete(message.toolCallId);
     return [catalog];
   });
+  const pendingInternalResults = request.messages.flatMap((message) => {
+    if (!message.toolCallId) return [];
+    const internalResult = state.pendingInternalResults.get(message.toolCallId);
+    if (!internalResult) return [];
+    state.pendingInternalResults.delete(message.toolCallId);
+    return [internalResult];
+  });
   const compiled = compileClassicTurn(request, undefined, [
     ...new Set(pendingCatalogs),
+    ...new Set(pendingInternalResults),
   ]);
   let prompt = compiled.prompt;
 
@@ -81,39 +101,102 @@ export async function completeOpenCodeRequest(
       correlationId,
       fields: { prompt, repairCount },
     });
+
     const message = await gateway.sendAndRead(prompt, correlationId);
+
     await logDebug("provider", "classic-output", {
       correlationId,
       fields: { message: messageText(message), repairCount },
     });
+
     const result = parseOpenCodeToolBlocks(
       message,
-      [...compiled.tools, listToolsTool],
+      [...compiled.tools, listToolsTool, finishTool],
       turn,
     );
+
+    if (result.kind === "text") {
+      if (result.text) onIntermediate?.(result.text);
+      prompt = [
+        "The coding-agent turn is still active. Continue working on the current task: reason through what remains, investigate or verify assumptions, and use the available tools whenever they can materially advance the work. Do not stop merely because you have an intermediate result or no immediate tool call to make.",
+        "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish`. Do this by including the following `tools` block verbatim:",
+        "```tools",
+        '{"name":"finish","input":{}}',
+        "```",
+        "The prose alongside the `finish` block becomes the final response to the user. It should concisely summarize the work performed, the important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.",
+      ].join("\n");
+      repairCount -= 1;
+      continue;
+    }
+
     if (result.kind === "tool-calls") {
-      const requestedCatalog = result.calls.some(
-        (call) => call.name === "listtools",
-      );
-      if (requestedCatalog) {
-        const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`;
-        const realCalls = result.calls.filter(
+      const finishCalls = result.calls.filter((call) => call.name === "finish");
+      if (finishCalls.length > 0) {
+        if (result.calls.length === 1) {
+          return completion(request.model, turn, {
+            kind: "text",
+            text: result.text,
+          });
+        }
+
+        const remainingCalls = result.calls.filter(
+          (call) => call.name !== "finish",
+        );
+        const finishIgnored =
+          "The `finish` call was ignored because it was called alongside another tool. The other tools were executed and the coding-agent turn remains active.";
+        const requestedCatalog = remainingCalls.some(
+          (call) => call.name === "listtools",
+        );
+        const realCalls = remainingCalls.filter(
           (call) => call.name !== "listtools",
         );
+        const catalog = requestedCatalog
+          ? `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`
+          : undefined;
+
         if (realCalls.length === 0) {
-          prompt = `${catalog}\n\nContinue the current task. Invoke tools only with a fenced \`tools\` block.`;
+          prompt = [catalog, finishIgnored].filter(Boolean).join("\n\n");
           repairCount -= 1;
           continue;
         }
+
         for (const call of realCalls) {
-          state.pendingToolCatalogs.set(call.id, catalog);
+          state.pendingInternalResults.set(call.id, finishIgnored);
+          if (catalog) state.pendingToolCatalogs.set(call.id, catalog);
         }
         return completion(request.model, turn, {
           ...result,
           calls: realCalls,
         });
       }
+
+      const requestedCatalog = result.calls.some(
+        (call) => call.name === "listtools",
+      );
+
+      if (requestedCatalog) {
+        const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`;
+        const realCalls = result.calls.filter(
+          (call) => call.name !== "listtools",
+        );
+
+        if (realCalls.length === 0) {
+          prompt = `${catalog}\n\nContinue the current task. Invoke tools only with a fenced \`tools\` block.`;
+          repairCount -= 1;
+          continue;
+        }
+
+        for (const call of realCalls) {
+          state.pendingToolCatalogs.set(call.id, catalog);
+        }
+
+        return completion(request.model, turn, {
+          ...result,
+          calls: realCalls,
+        });
+      }
     }
+
     if (result.kind !== "repair")
       return completion(request.model, turn, result);
 
@@ -122,6 +205,7 @@ export async function completeOpenCodeRequest(
         `ChatWorks could not obtain a valid tool request after ${repairLimit} repairs: ${result.message}`,
       );
     }
+
     prompt = result.message;
   }
 

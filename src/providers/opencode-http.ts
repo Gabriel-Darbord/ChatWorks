@@ -70,6 +70,8 @@ export function createOpenCodeProviderServer(
         fields: { body: JSON.stringify(body) },
       });
       await logEvent("provider", "queued", { correlationId });
+      const streaming = streamRequested(body);
+      if (streaming) beginStream(response);
       const completion = await complete(async () => {
         await logEvent("provider", "started", {
           correlationId,
@@ -80,6 +82,9 @@ export function createOpenCodeProviderServer(
           gateway,
           correlationId,
           providerState,
+          streaming
+            ? (text) => writeIntermediateChunk(response, body, text)
+            : undefined,
         );
       });
       await logDebug("provider", "opencode-output", {
@@ -90,8 +95,8 @@ export function createOpenCodeProviderServer(
         correlationId,
         fields: { durationMs: Date.now() - startedAt },
       });
-      if (streamRequested(body)) {
-        respondStream(response, completion);
+      if (streaming) {
+        respondStream(response, completion, false);
       } else {
         respondJson(response, 200, completion);
       }
@@ -106,12 +111,16 @@ export function createOpenCodeProviderServer(
         },
       });
       await logError("provider-request", error);
-      respondJson(response, 400, {
-        error: {
-          message,
-          type: "invalid_request_error",
-        },
-      });
+      if (response.headersSent) {
+        response.end("data: [DONE]\n\n");
+      } else {
+        respondJson(response, 400, {
+          error: {
+            message,
+            type: "invalid_request_error",
+          },
+        });
+      }
     }
   });
 }
@@ -159,15 +168,44 @@ function respondJson(
   response.end(JSON.stringify(value));
 }
 
-function respondStream(
-  response: ServerResponse,
-  completion: OpenAICompletion,
-): void {
+function beginStream(response: ServerResponse): void {
   response.writeHead(200, {
     "cache-control": "no-cache",
     connection: "keep-alive",
     "content-type": "text/event-stream",
   });
+}
+
+function writeIntermediateChunk(
+  response: ServerResponse,
+  request: unknown,
+  content: string,
+): void {
+  const model =
+    typeof request === "object" && request !== null && !Array.isArray(request)
+      ? String((request as Record<string, unknown>).model ?? "chatworks")
+      : "chatworks";
+  writeEvent(response, {
+    id: "chatcmpl_chatworks_intermediate",
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1_000),
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant", content },
+        finish_reason: null,
+      },
+    ],
+  });
+}
+
+function respondStream(
+  response: ServerResponse,
+  completion: OpenAICompletion,
+  writeHeaders = true,
+): void {
+  if (writeHeaders) beginStream(response);
 
   const choice = completion.choices[0];
   if (choice.finish_reason === "tool_calls") {
