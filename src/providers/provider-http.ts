@@ -102,7 +102,7 @@ export function createProviderServer(
         fields: { durationMs: Date.now() - startedAt },
       });
       if (streaming) {
-        respondStream(response, completion, false, false);
+        respondStream(response, completion, false, true);
       } else {
         respondJson(response, 200, completion);
       }

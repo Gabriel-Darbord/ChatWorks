@@ -71,6 +71,27 @@ test("returns only a new, stable Classic assistant response", async () => {
   assert.equal(result.raw, "New response");
 });
 
+test("does not accept a transient AX object-replacement placeholder as a reply", async () => {
+  const fixture = operations(
+    [
+      observation("Old response"),
+      observation("\uFFFC"),
+      observation("\uFFFC"),
+      observation("Actual response"),
+      observation("Actual response"),
+    ],
+    [true, true, true, true],
+  );
+  const gateway = classicProviderGateway(fixture.operations, {
+    pollMilliseconds: 0,
+    timeoutMilliseconds: 100,
+  });
+
+  const result = await gateway.sendAndRead("Provider prompt");
+
+  assert.equal(result.raw, "Actual response");
+});
+
 test("waits for the composer before accepting a stable reply", async () => {
   const fixture = operations(
     [

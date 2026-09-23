@@ -66,7 +66,7 @@ export function compileClassicTurn(
       "You are the model for one coding-agent turn.",
       "Work on the user's request across as many internal turns as needed. Continue reasoning, investigating, implementing, and verifying until the task is complete or further progress requires information or action only the user can provide. Partial findings, intermediate results, or knowing the next step are not reasons to stop.",
       "You have access to the tools listed under Active tools. Invoke them by writing tool calls in a fenced `tools` block. The fenced block is the tool-calling interface: it is intercepted, executed, and the results are returned to you in a subsequent turn. Use tools whenever they can materially advance the task. Do not require or look for any other tool-calling mechanism, and do not claim that you cannot access or operate on the environment when an Active tool provides that capability.",
-      "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish` with an empty input object. The prose alongside `finish` is returned to the user as the final response. Summarize the work performed, important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.",
+      "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish` with a `conclusion` string. The conclusion is returned to the user as the final response, so summarize the work performed, important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input there.",
       "A response without `finish` does not end the coding-agent turn. If no tool call is appropriate yet, continue reasoning about the task rather than stopping prematurely. Do not call `finish` alongside another tool.",
       "When using tools:",
       "- Emit exactly one fenced `tools` block in that response.",
@@ -262,7 +262,7 @@ export function formatTools(
     .join("\n\n");
 }
 
-function formatCompactTools(tools: ProviderTool[]): string {
+export function formatCompactTools(tools: ProviderTool[]): string {
   if (tools.length === 0) return "No tools are available for this turn.";
   return `Available tool names: ${tools.map((tool) => tool.name).join(", ")}. If you need the full tool definitions and input schemas, call listtools with an empty input object.`;
 }
@@ -308,7 +308,7 @@ function estimateTokens(messages: ProviderChatMessage[]): number {
   return Math.floor(characters / 4);
 }
 
-function formatSection(label: string, source: string): string {
+export function formatSection(label: string, source: string): string {
   return `${label}:\n\`\`\`text\n${source}\n\`\`\``;
 }
 

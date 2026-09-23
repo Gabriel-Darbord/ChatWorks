@@ -4,6 +4,8 @@ import { logDebug } from "../core/diagnostics.ts";
 import {
   compileClassicTurn,
   decodeProviderRequest,
+  formatCompactTools,
+  formatSection,
   formatTools,
   type ProviderRequest,
 } from "./provider-request.ts";
@@ -32,7 +34,20 @@ const listToolsTool = {
 
 const finishTool = {
   name: "finish",
-  input: internalToolInput,
+  input: {
+    required: ["conclusion"],
+    schema: {
+      type: "object",
+      properties: {
+        conclusion: {
+          type: "string",
+          description: "Final response returned to the user.",
+        },
+      },
+      required: ["conclusion"],
+      additionalProperties: false,
+    },
+  },
 };
 
 export type ClassicProviderGateway = {
@@ -123,18 +138,16 @@ export async function completeProviderRequest(
       toolAdapter,
     );
 
-    if (result.kind !== "repair" && result.text) {
+    if (result.kind === "text" && result.text) {
       onIntermediate?.(result.text);
     }
 
     if (result.kind === "text") {
       prompt = [
         "The coding-agent turn is still active. Continue working on the current task: reason through what remains, investigate or verify assumptions, and use the available tools whenever they can materially advance the work. Do not stop merely because you have an intermediate result or no immediate tool call to make.",
-        "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish`. Do this by including the following `tools` block verbatim:",
-        "```tools",
-        '{"name":"finish","input":{}}',
-        "```",
-        "The prose alongside the `finish` block becomes the final response to the user. It should concisely summarize the work performed, the important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.",
+        "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish` with a `conclusion` string. The conclusion becomes the final response to the user and should concisely summarize the work performed, important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.",
+        "",
+        formatSection("Active tools", formatCompactTools(request.tools)),
       ].join("\n");
       repairCount -= 1;
       continue;
@@ -144,9 +157,19 @@ export async function completeProviderRequest(
       const finishCalls = result.calls.filter((call) => call.name === "finish");
       if (finishCalls.length > 0) {
         if (result.calls.length === 1) {
+          const conclusion = finishCalls[0].input.conclusion;
+          if (
+            typeof conclusion !== "string" ||
+            conclusion.trim().length === 0
+          ) {
+            prompt =
+              "The `finish` conclusion must be a non-empty string. Continue the current task, then call `finish` with the final response in `input.conclusion`.";
+            repairCount -= 1;
+            continue;
+          }
           return completion(request.model, turn, {
             kind: "text",
-            text: result.text,
+            text: conclusion,
           });
         }
 

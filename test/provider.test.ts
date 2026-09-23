@@ -64,7 +64,7 @@ test("maps ordered Classic tool blocks to an OpenAI completion", async () => {
 
 test("returns a Classic-generated client title", async () => {
   const fixture = gateway(
-    'Available tools overview\n\n```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Available tools overview"}}\n```',
   );
   const result = await completeProviderRequest(
     {
@@ -121,7 +121,7 @@ test("serves the full tool catalog through listtools", async () => {
 test("composes listtools with surrounding real tool calls", async () => {
   const fixture = gateway(
     '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n{"name":"listtools","input":{}}\n{"name":"read","input":{"path":"src/b.ts"}}\n```',
-    'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
   );
   const state = createProviderState();
   const continuedRequest = {
@@ -179,7 +179,7 @@ test("composes listtools with surrounding real tool calls", async () => {
 
 test("finishes internally with prose as the final response", async () => {
   const fixture = gateway(
-    'Implementation complete.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Implementation complete."}}\n```',
   );
 
   const result = await completeProviderRequest(request, fixture.gateway);
@@ -189,19 +189,24 @@ test("finishes internally with prose as the final response", async () => {
   assert.equal(result.choices[0].finish_reason, "stop");
 });
 
-test("allows finish with an empty final response", async () => {
-  const fixture = gateway('```tools\n{"name":"finish","input":{}}\n```');
+test("rejects finish without a conclusion", async () => {
+  const fixture = gateway(
+    '```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
+  );
 
   const result = await completeProviderRequest(request, fixture.gateway);
 
-  assert.equal(result.choices[0].message.content, "");
+  assert.equal(fixture.prompts.length, 2);
+  assert.match(fixture.prompts[1], /conclusion/);
+  assert.equal(result.choices[0].message.content, "Done.");
   assert.equal(result.choices[0].finish_reason, "stop");
 });
 
 test("emits all Classic prose while continuing internally until finish", async () => {
   const fixture = gateway(
     "Partial finding.",
-    'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
   );
 
   const intermediate: string[] = [];
@@ -215,15 +220,15 @@ test("emits all Classic prose while continuing internally until finish", async (
 
   assert.equal(fixture.prompts.length, 2);
   assert.match(fixture.prompts[1], /coding-agent turn is still active/i);
-  assert.deepEqual(intermediate, ["Partial finding.", "Done."]);
+  assert.deepEqual(intermediate, ["Partial finding."]);
   assert.equal(result.choices[0].message.content, "Done.");
   assert.equal(result.choices[0].finish_reason, "stop");
 });
 
 test("ignores finish alongside another tool and executes the other tool", async () => {
   const fixture = gateway(
-    'Still checking.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n{"name":"finish","input":{}}\n```',
-    'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    'Still checking.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n{"name":"finish","input":{"conclusion":"Premature conclusion"}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
   );
   const state = createProviderState();
 
@@ -267,8 +272,8 @@ test("ignores finish alongside another tool and executes the other tool", async 
 
 test("ignores finish alongside listtools and serves the catalog", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"listtools","input":{}}\n{"name":"finish","input":{}}\n```',
-    'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"listtools","input":{}}\n{"name":"finish","input":{"conclusion":"Premature conclusion"}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
   );
 
   const result = await completeProviderRequest(request, fixture.gateway);

@@ -57,7 +57,7 @@ test("persists provider lifecycle transitions without request bodies", async () 
 
   try {
     await withServer(
-      'All set.\n\n```tools\n{"name":"finish","input":{}}\n```',
+      '```tools\n{"name":"finish","input":{"conclusion":"All set."}}\n```',
       async (url) => {
         const response = await fetch(`${url}/v1/chat/completions`, {
           method: "POST",
@@ -89,7 +89,7 @@ test("persists provider lifecycle transitions without request bodies", async () 
 
 test("serves a non-streaming OpenAI-compatible completion", async () => {
   await withServer(
-    'All set.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"All set."}}\n```',
     async (url, prompts) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
         method: "POST",
@@ -140,7 +140,7 @@ test("streams prose-only internal iterations before the final response", async (
   await withServer(
     [
       "Partial finding.",
-      'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
+      '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
     ],
     async (url, prompts) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
@@ -154,6 +154,7 @@ test("streams prose-only internal iterations before the final response", async (
       const intermediateIndex = body.indexOf('"content":"Partial finding."');
       const finalIndex = body.indexOf('"content":"Done."');
       assert.ok(intermediateIndex >= 0);
+      assert.ok(finalIndex >= 0);
       assert.ok(intermediateIndex < finalIndex);
       assert.equal(body.split('"content":"Partial finding."').length - 1, 1);
       assert.equal(body.split('"content":"Done."').length - 1, 1);
@@ -169,7 +170,7 @@ test("streams prose-only internal iterations before the final response", async (
 
 test("accepts requests larger than the former 10 MB transport limit", async () => {
   await withServer(
-    'All set.\n\n```tools\n{"name":"finish","input":{}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"All set."}}\n```',
     async (url, prompts) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
         method: "POST",

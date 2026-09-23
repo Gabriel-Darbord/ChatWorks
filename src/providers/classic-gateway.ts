@@ -105,6 +105,7 @@ async function waitForNewAssistantMessage(
     if (
       !observation ||
       observation.latestMessageRole !== "assistant" ||
+      isAccessibilityPlaceholder(observation) ||
       (previous && sameAssistantMessage(previous, observation))
     ) {
       candidate = undefined;
@@ -144,6 +145,16 @@ async function waitForNewAssistantMessage(
   });
   throw new Error(
     "Timed out waiting for a new stable ChatGPT Classic response.",
+  );
+}
+
+function isAccessibilityPlaceholder(
+  observation: AssistantObservation,
+): boolean {
+  return (
+    messageText(observation.message)
+      .replace(/\uFFFC/g, "")
+      .trim().length === 0
   );
 }
 
