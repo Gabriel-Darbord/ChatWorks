@@ -276,7 +276,10 @@ public struct ChatGPTAccessibility {
 
   public func assistantMessageState() -> AssistantMessageState {
     if let classicAccessibilityReader, !classicAccessibilityReader.latestParts().isEmpty {
-      return AssistantMessageState(responseHeadingCount: 1, scrollToBottomVisible: false)
+      return AssistantMessageState(
+        responseHeadingCount: 1,
+        scrollToBottomVisible: hasVisibleScrollToBottomButton()
+      )
     }
     return AssistantMessageState(
       responseHeadingCount: descendants(of: application).count(where: isAssistantMessageHeading),

@@ -64,15 +64,14 @@ export function compileClassicTurn(
   const sections = [
     [
       "You are the model for one coding-agent turn.",
-      "You have access to the tools listed below. Use them when needed to complete the user's request. A tool call is performed by writing it in a fenced `tools` block. Tool calls will be executed and their results returned to you so you can continue the task.",
-      // "Use them when needed to complete the user's request." -> "Use tools rather than claiming you cannot access the environment."?
-      "When the user's request requires investigation, implementation, verification, or another operation, continue using the available tools until the requested work is complete or you are genuinely blocked by information or action only the user can provide. Do not stop merely because you have partial findings, an intermediate result, or a clear next step. If further available tool calls can materially advance the request, make them instead of ending the turn.",
+      "You have access to the tools listed under Active tools. Invoke them by writing tool calls in a fenced `tools` block. The fenced block is the tool-calling interface: it is intercepted, executed, and the results are returned to you in a subsequent turn. Do not require or look for any other tool-calling mechanism. If an operation can be performed with an Active tool, use that tool rather than claiming that you cannot access or operate on the environment.",
+      "For tasks that require investigation, implementation, verification, or any other operation, keep using tools until the user's request is complete or you are genuinely blocked by information or action only the user can provide. A response without a tool call ends the coding-agent turn, so do not give a tool-free response while another available tool call could materially advance the task. Partial findings, an intermediate result, or knowing the next step are not reasons to stop.",
       "When using tools:",
-      "- Emit exactly one fenced `tools` block in your response.",
+      "- Emit exactly one fenced `tools` block in that response.",
       "- Do not use any other fenced blocks in that response.",
       "- You may include ordinary prose outside the `tools` block.",
       "- Write one JSON object with `name` and `input` fields per tool call, one per line.",
-      "- Put multiple independent tool calls in the same block. When a later call depends on an earlier result, wait for that result before requesting it.",
+      "- Put independent tool calls in the same block. If a call depends on an earlier result, wait for that result before requesting it.",
       "- Only call tools listed under Active tools.",
     ].join("\n"),
     includeToolCatalog
