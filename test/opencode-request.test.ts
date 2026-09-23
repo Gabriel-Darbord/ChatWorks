@@ -31,7 +31,7 @@ test("compiles the current request, active tool schemas, and newest context", ()
     ],
   });
 
-  const compiled = compileClassicTurn(request);
+  const compiled = compileClassicTurn(request, true);
 
   assert.deepEqual(compiled.tools, [
     {
@@ -43,11 +43,73 @@ test("compiles the current request, active tool schemas, and newest context", ()
       },
     },
   ]);
-  assert.match(compiled.prompt, /one or more fenced `tool` blocks/);
+  assert.match(compiled.prompt, /fenced `tools` block/);
   assert.match(compiled.prompt, /name: read/);
   assert.match(compiled.prompt, /Work carefully\./);
   assert.match(compiled.prompt, /src\/app\.ts contains one TODO\./);
   assert.doesNotMatch(compiled.prompt, /Old request/);
+});
+
+test("uses only compact tool discovery after the initial turn", () => {
+  const request = decodeOpenCodeProviderRequest({
+    model: "chatworks",
+    messages: [
+      { role: "user", content: "Inspect the project." },
+      { role: "assistant", content: "I inspected it." },
+      { role: "user", content: "Continue." },
+    ],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "read",
+          description: "A deliberately verbose description.",
+          parameters: { type: "object", required: ["path"] },
+        },
+      },
+    ],
+  });
+
+  const prompt = compileClassicTurn(request).prompt;
+  assert.match(prompt, /Available tool names: read/);
+  assert.match(prompt, /call listtools/);
+  assert.doesNotMatch(prompt, /deliberately verbose/);
+  assert.doesNotMatch(prompt, /input schema/);
+});
+
+test("repeats agent instructions only when estimated conversation tokens cross the interval", () => {
+  const system = { role: "system", content: "Persistent instructions." };
+  const tools: unknown[] = [];
+
+  const belowInterval = decodeOpenCodeProviderRequest({
+    model: "chatworks",
+    messages: [
+      system,
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "Earlier response" },
+      { role: "user", content: "Continue." },
+    ],
+    tools,
+  });
+  assert.doesNotMatch(
+    compileClassicTurn(belowInterval).prompt,
+    /Persistent instructions/,
+  );
+
+  const crossingInterval = decodeOpenCodeProviderRequest({
+    model: "chatworks",
+    messages: [
+      system,
+      { role: "user", content: "x".repeat(47_990) },
+      { role: "assistant", content: "response" },
+      { role: "user", content: "x".repeat(100) },
+    ],
+    tools,
+  });
+  assert.match(
+    compileClassicTurn(crossingInterval).prompt,
+    /Persistent instructions/,
+  );
 });
 
 test("renders tool descriptions with their original line breaks", () => {
@@ -87,6 +149,24 @@ test("accepts OpenAI text-content arrays", () => {
   assert.equal(
     compileClassicTurn(request).prompt.includes("Inspect this file."),
     true,
+  );
+});
+
+test("preserves a tool result followed by a steering user message", () => {
+  const request = decodeOpenCodeProviderRequest({
+    model: "chatworks",
+    messages: [
+      { role: "user", content: "Go" },
+      { role: "assistant", content: "" },
+      { role: "tool", content: "WAIT_PRINT_COMPLETE" },
+      { role: "user", content: "steer" },
+    ],
+  });
+
+  const prompt = compileClassicTurn(request).prompt;
+  assert.match(
+    prompt,
+    /Tool result 1:\n\nWAIT_PRINT_COMPLETE\n\nEVERYTHING BELOW IS CONVERSATION UPDATE:\n\nsteer/,
   );
 });
 

@@ -8,6 +8,8 @@ import {
   sameAssistantMessage,
   type AssistantObservation,
 } from "../core/assistant-observation.ts";
+import { logDebug } from "../core/diagnostics.ts";
+import { messageText } from "../core/message.ts";
 import type { ClassicProviderGateway } from "./opencode-provider.ts";
 
 export type ClassicProviderOperations = {
@@ -34,9 +36,20 @@ export function classicProviderGateway(
     options.timeoutMilliseconds ?? defaultTimeoutMilliseconds;
 
   return {
-    async sendAndRead(prompt) {
+    async sendAndRead(prompt, correlationId) {
       const previous = await operations.observeAssistant();
+      await logDebug("classic", "pre-submit-observation", {
+        correlationId,
+        fields: {
+          role: previous?.latestMessageRole ?? null,
+          message: previous ? messageText(previous.message) : null,
+        },
+      });
       const submission = await operations.submit(prompt);
+      await logDebug("classic", "submission", {
+        correlationId,
+        fields: { status: submission },
+      });
       if (submission !== "submitted") {
         throw new Error(`ChatGPT Classic composer is ${submission}.`);
       }
@@ -46,6 +59,7 @@ export function classicProviderGateway(
         operations,
         pollMilliseconds,
         timeoutMilliseconds,
+        correlationId,
       );
     },
   };
@@ -56,12 +70,28 @@ async function waitForNewAssistantMessage(
   operations: ClassicProviderOperations,
   pollMilliseconds: number,
   timeoutMilliseconds: number,
+  correlationId?: string,
 ) {
   const deadline = Date.now() + timeoutMilliseconds;
   let candidate: AssistantObservation | undefined;
+  let poll = 0;
 
   while (Date.now() < deadline) {
+    poll += 1;
     const observation = await operations.observeAssistant();
+    await logDebug("classic", "observation", {
+      correlationId,
+      fields: {
+        poll,
+        role: observation?.latestMessageRole ?? null,
+        message: observation ? messageText(observation.message) : null,
+        sameAsPrevious: Boolean(
+          observation &&
+          previous &&
+          sameAssistantMessage(previous, observation),
+        ),
+      },
+    });
     if (
       !observation ||
       observation.latestMessageRole !== "assistant" ||
@@ -72,13 +102,22 @@ async function waitForNewAssistantMessage(
       continue;
     }
 
-    if (!(await operations.composerAvailable())) {
+    const composerAvailable = await operations.composerAvailable();
+    await logDebug("classic", "composer-state", {
+      correlationId,
+      fields: { poll, available: composerAvailable },
+    });
+    if (!composerAvailable) {
       candidate = observation;
       await operations.wait(pollMilliseconds);
       continue;
     }
 
     if (candidate && sameAssistantMessage(candidate, observation)) {
+      await logDebug("classic", "accepted", {
+        correlationId,
+        fields: { poll, message: messageText(observation.message) },
+      });
       return observation.message;
     }
 
@@ -86,6 +125,13 @@ async function waitForNewAssistantMessage(
     await operations.wait(pollMilliseconds);
   }
 
+  await logDebug("classic", "timeout", {
+    correlationId,
+    fields: {
+      polls: poll,
+      candidate: candidate ? messageText(candidate.message) : null,
+    },
+  });
   throw new Error(
     "Timed out waiting for a new stable ChatGPT Classic response.",
   );

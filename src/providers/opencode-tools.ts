@@ -1,4 +1,8 @@
 import { messageText, type Message } from "../core/message.ts";
+import {
+  presentOpenCodeTool,
+  restoreOpenCodeToolInput,
+} from "./opencode-tool-transformations.ts";
 
 export type OpenCodeTool = {
   name: string;
@@ -40,33 +44,75 @@ export function parseOpenCodeToolBlocks(
   tools: OpenCodeTool[],
   providerTurn: string,
 ): ToolProtocolResult {
-  const toolBlocks = message.parts.filter(
-    (part): part is Extract<Message["parts"][number], { kind: "block" }> =>
-      part.kind === "block" && part.language === "tool",
-  );
-  const visibleParts: Message["parts"] = [];
-  for (const part of message.parts) {
-    if (part.kind === "block" && part.language === "tool") continue;
-    if (part.kind === "plain-text") {
-      const text = part.text.trim();
-      if (text) visibleParts.push({ ...part, text });
-    } else {
-      visibleParts.push(part);
+  const parts = [...message.parts];
+
+  while (true) {
+    const lastPart = parts.at(-1);
+    if (lastPart?.kind !== "plain-text" || lastPart.text.trim().length !== 0) {
+      break;
     }
+    parts.pop();
   }
-  const text = messageText({ parts: visibleParts }).trim();
 
-  if (toolBlocks.length === 0) return { kind: "text", text };
+  const toolPartIndexes = parts.flatMap((part, index) =>
+    part.kind === "block" && part.language === "tools" ? [index] : [],
+  );
+  if (toolPartIndexes.length === 0) {
+    return { kind: "text", text: messageText(message).trim() };
+  }
+  if (toolPartIndexes.length > 1) {
+    return repair(
+      1,
+      "the response contains more than one tools block",
+      exampleFor(tools[0]),
+    );
+  }
 
-  const available = new Map(tools.map((tool) => [tool.name, tool]));
+  const otherBlock = parts.find(
+    (part): part is Extract<typeof part, { kind: "block" }> =>
+      part.kind === "block" && part.language !== "tools",
+  );
+  if (otherBlock) {
+    return repair(
+      1,
+      `the response contains a \`${otherBlock.language || "text"}\` block in addition to the tools block; when invoking tools, the tools block must be the only fenced block`,
+      exampleFor(tools[0]),
+    );
+  }
+
+  const toolPartIndex = toolPartIndexes[0];
+  const toolsPart = parts[toolPartIndex];
+  if (toolsPart.kind !== "block") throw new Error("Unreachable tools part.");
+
+  const text = messageText({
+    parts: parts
+      .filter((_, index) => index !== toolPartIndex)
+      .map((part) =>
+        part.kind === "plain-text" ? { ...part, text: part.text.trim() } : part,
+      ),
+  }).trim();
+  const callLines = toolsPart.source
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (callLines.length === 0)
+    return repair(
+      1,
+      "the tools block contains no tool calls",
+      exampleFor(tools[0]),
+    );
+
+  const presentedTools = tools.map(presentOpenCodeTool);
+  const available = new Map(presentedTools.map((tool) => [tool.name, tool]));
   const calls: ProviderToolCall[] = [];
 
-  for (const [index, block] of toolBlocks.entries()) {
-    const parsed = parseEnvelope(block.source, index + 1, tools);
+  for (const [index, line] of callLines.entries()) {
+    const parsed = parseEnvelope(line, index + 1, presentedTools);
     if (parsed.kind === "repair") return parsed;
 
     const tool = available.get(parsed.name);
-    if (!tool) return repairUnknownTool(index + 1, parsed.name, tools);
+    if (!tool) return repairUnknownTool(index + 1, parsed.name, presentedTools);
 
     const missing = (tool.input?.required ?? []).filter(
       (field) => !(field in parsed.input),
@@ -77,7 +123,7 @@ export function parseOpenCodeToolBlocks(
     calls.push({
       id: `chatworks_${providerTurn}_${index + 1}`,
       name: parsed.name,
-      input: parsed.input,
+      input: restoreOpenCodeToolInput(parsed.name, parsed.input),
     });
   }
 
@@ -95,13 +141,13 @@ function parseEnvelope(
   try {
     parsed = JSON.parse(source) as ToolEnvelope;
   } catch {
-    return repair(index, "the block is not valid JSON", exampleFor(tools[0]));
+    return repair(index, "the line is not valid JSON", exampleFor(tools[0]));
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return repair(
       index,
-      "the block must be one JSON object",
+      "the line must be one JSON object",
       exampleFor(tools[0]),
     );
   }
@@ -164,7 +210,7 @@ function repair(
 ): Extract<ToolProtocolResult, { kind: "repair" }> {
   return {
     kind: "repair",
-    message: `Tool request ${index} was rejected: ${reason}\n\nRetry with:\n\n\`\`\`tool\n${example}\n\`\`\``,
+    message: `Tool request ${index} was rejected: ${reason}\n\nRetry with:\n\n\`\`\`tools\n${example}\n\`\`\``,
   };
 }
 

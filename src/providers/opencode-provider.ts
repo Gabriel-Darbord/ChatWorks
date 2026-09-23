@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import type { Message } from "../core/message.ts";
+import { messageText, type Message } from "../core/message.ts";
+import { logDebug } from "../core/diagnostics.ts";
 import {
   compileClassicTurn,
   decodeOpenCodeProviderRequest,
+  formatTools,
   type OpenCodeProviderRequest,
 } from "./opencode-request.ts";
 import {
@@ -11,9 +13,20 @@ import {
 } from "./opencode-tools.ts";
 
 const repairLimit = 2;
+const listToolsTool = {
+  name: "listtools",
+  input: {
+    required: ["name"],
+    schema: {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+    },
+  },
+};
 
 export type ClassicProviderGateway = {
-  sendAndRead(prompt: string): Promise<Message>;
+  sendAndRead(prompt: string, correlationId?: string): Promise<Message>;
 };
 
 export type OpenAICompletion = {
@@ -39,6 +52,7 @@ export type OpenAICompletion = {
 export async function completeOpenCodeRequest(
   value: unknown,
   gateway: ClassicProviderGateway,
+  correlationId?: string,
 ): Promise<OpenAICompletion> {
   const request = decodeOpenCodeProviderRequest(value);
   const turn = providerTurnId(request);
@@ -46,11 +60,35 @@ export async function completeOpenCodeRequest(
   let prompt = compiled.prompt;
 
   for (let repairCount = 0; repairCount <= repairLimit; repairCount += 1) {
+    await logDebug("provider", "classic-input", {
+      correlationId,
+      fields: { prompt, repairCount },
+    });
+    const message = await gateway.sendAndRead(prompt, correlationId);
+    await logDebug("provider", "classic-output", {
+      correlationId,
+      fields: { message: messageText(message), repairCount },
+    });
     const result = parseOpenCodeToolBlocks(
-      await gateway.sendAndRead(prompt),
-      compiled.tools,
+      message,
+      [...compiled.tools, listToolsTool],
       turn,
     );
+    if (
+      result.kind === "tool-calls" &&
+      result.calls.length === 1 &&
+      result.calls[0].name === "listtools"
+    ) {
+      const requestedName = result.calls[0].input.name;
+      const requestedTool = compiled.tools.find(
+        (tool) => tool.name === requestedName,
+      );
+      prompt = requestedTool
+        ? `Tool definition requested:\n\n${formatTools([requestedTool])}\n\nContinue the current task. Invoke tools only with a fenced \`tools\` block.`
+        : `No tool named ${JSON.stringify(requestedName)} is available. Available tool names: ${compiled.tools.map((tool) => tool.name).join(", ")}. Continue the current task.`;
+      repairCount -= 1;
+      continue;
+    }
     if (result.kind !== "repair")
       return completion(request.model, turn, result);
 

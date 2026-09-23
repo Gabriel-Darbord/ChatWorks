@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { ParticipantCreationGateway } from "../core/participants.ts";
+import { logEvent } from "../core/diagnostics.ts";
 import {
   messageFromAccessibilityParts,
   type AccessibilityMessagePart,
@@ -267,6 +268,17 @@ export function callBridge(
   arguments_: string[],
   input?: string,
 ): Promise<string> {
+  const command = arguments_[0] ?? "unknown";
+  const correlationId = `bridge-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const startedAt = Date.now();
+  void logEvent("bridge", "started", {
+    correlationId,
+    fields: {
+      command,
+      argumentCount: arguments_.length,
+      inputBytes: input === undefined ? 0 : Buffer.byteLength(input),
+    },
+  });
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.env.CHATWORKS_AX_BRIDGE ?? bridgePath,
@@ -279,17 +291,35 @@ export function callBridge(
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", reject);
+    child.once("error", (error) => {
+      void logEvent("bridge", "failed", {
+        correlationId,
+        fields: {
+          command,
+          durationMs: Date.now() - startedAt,
+          errorName: error.name,
+          errorMessage: error.message,
+        },
+      });
+      reject(error);
+    });
     child.once("close", (code) => {
-      if (code === 0) resolve(Buffer.concat(stdout).toString("utf8"));
+      const stderrText = Buffer.concat(stderr).toString("utf8").trim();
+      const stdoutText = Buffer.concat(stdout).toString("utf8");
+      void logEvent("bridge", code === 0 ? "completed" : "failed", {
+        correlationId,
+        fields: {
+          command,
+          exitCode: code,
+          durationMs: Date.now() - startedAt,
+          stdoutBytes: Buffer.byteLength(stdoutText),
+          stderrBytes: Buffer.byteLength(stderrText),
+          ...(stderrText ? { stderr: stderrText } : {}),
+        },
+      });
+      if (code === 0) resolve(stdoutText);
       else if (code === 2) reject(new NoAssistantMessageError());
-      else
-        reject(
-          new Error(
-            Buffer.concat(stderr).toString("utf8").trim() ||
-              `AX bridge exited ${code}`,
-          ),
-        );
+      else reject(new Error(stderrText || `AX bridge exited ${code}`));
     });
     child.stdin.end(input);
   });

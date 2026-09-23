@@ -41,7 +41,7 @@ function gateway(...replies: string[]): {
 
 test("maps ordered Classic tool blocks to an OpenAI completion", async () => {
   const fixture = gateway(
-    'I will inspect it.\n\n```tool\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
+    'I will inspect it.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
   );
 
   const result = await completeOpenCodeRequest(request, fixture.gateway);
@@ -88,10 +88,36 @@ test("returns a Classic-generated OpenCode title", async () => {
   assert.match(fixture.prompts[0], /title generator/);
 });
 
+test("serves an individual tool schema through listtools", async () => {
+  const fixture = gateway(
+    '```tools\n{"name":"listtools","input":{"name":"read"}}\n```',
+    '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
+  );
+
+  const result = await completeOpenCodeRequest(
+    {
+      ...request,
+      messages: [
+        { role: "user", content: "Inspect src/app.ts." },
+        { role: "assistant", content: "I will inspect it." },
+        { role: "user", content: "Continue." },
+      ],
+    },
+    fixture.gateway,
+  );
+
+  assert.equal(fixture.prompts.length, 2);
+  assert.doesNotMatch(fixture.prompts[0], /input schema/);
+  assert.match(fixture.prompts[0], /call listtools/);
+  assert.match(fixture.prompts[1], /name: read/);
+  assert.match(fixture.prompts[1], /input schema/);
+  assert.equal(result.choices[0].message.tool_calls?.[0].function.name, "read");
+});
+
 test("repairs an invalid block before returning a response", async () => {
   const fixture = gateway(
-    '```tool\n{"name":"read","input":[]}\n```',
-    '```tool\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
+    '```tools\n{"name":"read","input":[]}\n```',
+    '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
   );
 
   const result = await completeOpenCodeRequest(request, fixture.gateway);
@@ -103,9 +129,9 @@ test("repairs an invalid block before returning a response", async () => {
 
 test("fails after two bounded repair turns", async () => {
   const fixture = gateway(
-    "```tool\nnot json\n```",
-    "```tool\nnot json\n```",
-    "```tool\nnot json\n```",
+    "```tools\nnot json\n```",
+    "```tools\nnot json\n```",
+    "```tools\nnot json\n```",
   );
 
   await assert.rejects(

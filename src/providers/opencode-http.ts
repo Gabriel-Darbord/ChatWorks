@@ -9,9 +9,9 @@ import {
   type ClassicProviderGateway,
   type OpenAICompletion,
 } from "./opencode-provider.ts";
-import { logError } from "../core/diagnostics.ts";
+import { logDebug, logError, logEvent } from "../core/diagnostics.ts";
 
-const maxRequestBytes = 1_000_000;
+const maxRequestBytes = 100_000_000;
 
 export function createOpenCodeProviderServer(
   gateway: ClassicProviderGateway,
@@ -55,16 +55,34 @@ export function createOpenCodeProviderServer(
         return;
       }
 
+      const correlationId = `provider-${requestId}`;
       const body = await readJson(request);
-      console.log(
-        `chatworks provider request ${requestId}: waiting for ChatGPT`,
-      );
-      const completion = await complete(() =>
-        completeOpenCodeRequest(body, gateway),
-      );
-      console.log(
-        `chatworks provider request ${requestId}: completed in ${Date.now() - startedAt}ms`,
-      );
+      await logEvent("provider", "received", {
+        correlationId,
+        fields: {
+          requestBytes: Number(request.headers["content-length"] ?? 0),
+        },
+      });
+      await logDebug("provider", "opencode-input", {
+        correlationId,
+        fields: { body: JSON.stringify(body) },
+      });
+      await logEvent("provider", "queued", { correlationId });
+      const completion = await complete(async () => {
+        await logEvent("provider", "started", {
+          correlationId,
+          fields: { queueMs: Date.now() - startedAt },
+        });
+        return completeOpenCodeRequest(body, gateway, correlationId);
+      });
+      await logDebug("provider", "opencode-output", {
+        correlationId,
+        fields: { completion: JSON.stringify(completion) },
+      });
+      await logEvent("provider", "completed", {
+        correlationId,
+        fields: { durationMs: Date.now() - startedAt },
+      });
       if (streamRequested(body)) {
         respondStream(response, completion);
       } else {
@@ -72,7 +90,14 @@ export function createOpenCodeProviderServer(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`chatworks provider request ${requestId}: ${message}`);
+      await logEvent("provider", "failed", {
+        correlationId: `provider-${requestId}`,
+        fields: {
+          durationMs: Date.now() - startedAt,
+          errorName: error instanceof Error ? error.name : "unknown",
+          errorMessage: message,
+        },
+      });
       await logError("provider-request", error);
       respondJson(response, 400, {
         error: {
@@ -104,7 +129,6 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     length += buffer.length;
     if (length > maxRequestBytes) {
-      request.destroy();
       throw new Error(
         `Chat completion request exceeds ${maxRequestBytes} byte limit.`,
       );

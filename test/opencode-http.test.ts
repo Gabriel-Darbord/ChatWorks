@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { parseMessage } from "../src/core/message.ts";
@@ -43,6 +46,41 @@ async function withServer(
   }
 }
 
+test("persists provider lifecycle transitions without request bodies", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "chatworks-provider-"));
+  const path = join(directory, "events.jsonl");
+  const previousPath = process.env.CHATWORKS_EVENT_LOG;
+  process.env.CHATWORKS_EVENT_LOG = path;
+
+  try {
+    await withServer("All set.", async (url) => {
+      const response = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      assert.equal(response.status, 200);
+    });
+
+    const text = await readFile(path, "utf8");
+    const events = text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(
+      events.map((event) => event.event),
+      ["received", "queued", "started", "completed"],
+    );
+    assert.equal(new Set(events.map((event) => event.correlationId)).size, 1);
+    assert.doesNotMatch(text, /Inspect src\/app\.ts\./);
+    assert.doesNotMatch(text, /All set\./);
+  } finally {
+    if (previousPath === undefined) delete process.env.CHATWORKS_EVENT_LOG;
+    else process.env.CHATWORKS_EVENT_LOG = previousPath;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("serves a non-streaming OpenAI-compatible completion", async () => {
   await withServer("All set.", async (url, prompts) => {
     const response = await fetch(`${url}/v1/chat/completions`, {
@@ -65,7 +103,7 @@ test("serves a non-streaming OpenAI-compatible completion", async () => {
 
 test("streams tool calls in OpenAI-compatible SSE", async () => {
   await withServer(
-    '```tool\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
+    'I will inspect it.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
     async (url) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
         method: "POST",
@@ -88,6 +126,22 @@ test("streams tool calls in OpenAI-compatible SSE", async () => {
       assert.match(body, /data: \[DONE\]/);
     },
   );
+});
+
+test("accepts requests larger than the former 10 MB transport limit", async () => {
+  await withServer("All set.", async (url, prompts) => {
+    const response = await fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...request,
+        messages: [{ role: "user", content: "x".repeat(10_000_001) }],
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(prompts.length, 1);
+  });
 });
 
 test("reports malformed requests without contacting Classic", async () => {

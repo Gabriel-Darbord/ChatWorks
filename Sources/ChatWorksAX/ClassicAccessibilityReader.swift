@@ -47,7 +47,13 @@ struct ClassicAccessibilityReader {
     in elements: [AXUIElement],
     assistantLaneEnd: CGFloat
   ) -> [AccessibilityMessagePart] {
-    var parts: [AccessibilityMessagePart] = []
+    struct PositionedPart {
+      let y: CGFloat
+      let traversalIndex: Int
+      let part: AccessibilityMessagePart
+    }
+
+    var parts: [PositionedPart] = []
     var index = 0
 
     while index < elements.count {
@@ -60,7 +66,15 @@ struct ClassicAccessibilityReader {
         }),
         let source = staticText(of: elements[sourceIndex])
       {
-        parts.append(.code(language: language(of: element), source: source))
+        if let position = frame(of: element) {
+          parts.append(
+            PositionedPart(
+              y: position.minY,
+              traversalIndex: index,
+              part: .code(language: language(of: element), source: source)
+            )
+          )
+        }
         index = sourceIndex + 1
         continue
       }
@@ -68,12 +82,26 @@ struct ClassicAccessibilityReader {
       if isStaticText(element), isAssistantElement(element, assistantLaneEnd: assistantLaneEnd),
         let text = staticText(of: element)
       {
-        parts.append(.text(text))
+        if let position = frame(of: element) {
+          parts.append(
+            PositionedPart(
+              y: position.minY,
+              traversalIndex: index,
+              part: .text(text)
+            )
+          )
+        }
       }
       index += 1
     }
 
-    return parts
+    return
+      parts
+      .sorted {
+        if $0.y == $1.y { return $0.traversalIndex < $1.traversalIndex }
+        return $0.y < $1.y
+      }
+      .map(\.part)
   }
 
   private func isUserStaticText(_ element: AXUIElement, assistantLaneEnd: CGFloat) -> Bool {

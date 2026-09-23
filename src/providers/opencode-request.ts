@@ -1,3 +1,4 @@
+import { presentOpenCodeTool } from "./opencode-tool-transformations.ts";
 import type { OpenCodeTool } from "./opencode-tools.ts";
 
 export type OpenCodeChatMessage = {
@@ -46,21 +47,36 @@ export function decodeOpenCodeProviderRequest(
   };
 }
 
+const agentInstructionsTokenInterval = 12_000;
+
 export function compileClassicTurn(
   request: OpenCodeProviderRequest,
+  includeToolCatalog = isInitialTurn(request.messages),
 ): CompiledClassicTurn {
-  const update = newestConversationUpdate(request.messages);
+  const { toolResults, update } = newestConversationUpdate(request.messages);
   const system = request.messages.filter(
     (message) => message.role === "system" || message.role === "developer",
   );
-
+  const includeAgentInstructions =
+    includeToolCatalog || shouldIncludeAgentInstructions(request.messages);
   const sections = [
-    "You are the model for one ChatWorks coding-agent turn.",
-    "Reply normally when no operation is needed. To request an operation, use one or more fenced `tool` blocks. Each block must contain exactly one JSON object with `name` and `input` fields. Only use the tools listed below. Batch only independent operations; prefer fewer calls when later work depends on an earlier result.",
-    formatSection("Active tools", formatTools(request.tools)),
+    [
+      "You are the model for one coding-agent turn.",
+      "To request or perform any operation, your response MUST contain exactly one fenced `tools` block. This is the only way to invoke tools.",
+      "When invoking tools:",
+      "- Use exactly one fenced block in your entire response: the `tools` block.",
+      "- Do not use any other fenced blocks.",
+      "- You may include ordinary prose outside the `tools` block.",
+      "- Put multiple tool calls in the same `tools` block, one JSON object with `name` and `input` fields per line, in execution order.",
+      "- Batch only independent operations; prefer fewer calls when later work depends on an earlier result.",
+      "- Only use the available tools.",
+    ].join("\n"),
+    includeToolCatalog
+      ? formatSection("Active tools", formatTools(request.tools))
+      : formatSection("Active tools", formatCompactTools(request.tools)),
   ];
 
-  if (system.length > 0) {
+  if (system.length > 0 && includeAgentInstructions) {
     sections.push(
       formatSection(
         "Agent instructions",
@@ -69,7 +85,10 @@ export function compileClassicTurn(
     );
   }
 
-  sections.push(formatSection("Conversation update", update));
+  if (toolResults.length > 0) sections.push(toolResults);
+  sections.push("EVERYTHING BELOW IS CONVERSATION UPDATE:");
+  sections.push(update);
+
   return { prompt: sections.join("\n\n"), tools: request.tools };
 }
 
@@ -173,36 +192,42 @@ function decodeContent(value: unknown, label: string): string {
   throw new Error(`${label} content must be text.`);
 }
 
-function newestConversationUpdate(messages: OpenCodeChatMessage[]): string {
-  const lastMessage = messages.at(-1);
-  if (lastMessage?.role === "tool") {
-    let firstToolIndex = messages.length - 1;
-    while (firstToolIndex > 0 && messages[firstToolIndex - 1].role === "tool") {
-      firstToolIndex -= 1;
-    }
-    const toolMessages = messages.slice(firstToolIndex);
+function newestConversationUpdate(messages: OpenCodeChatMessage[]): {
+  toolResults: string;
+  update: string;
+} {
+  let start = messages.length - 1;
+  while (start >= 0 && messages[start].role !== "assistant") start -= 1;
 
-    return toolMessages
-      .map((message, index) => `Tool result ${index + 1}:\n\n${message.text}`)
-      .join("\n\n");
+  const updates = messages
+    .slice(start + 1)
+    .filter((message) => message.role === "user" || message.role === "tool");
+
+  if (updates.length === 0) {
+    throw new Error(
+      "Chat completion request must contain a user or tool message for this turn.",
+    );
   }
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role === "user") {
-      return message.text;
-    }
-  }
-
-  throw new Error(
-    "Chat completion request must contain a user or tool message for this turn.",
+  const toolResults = updates
+    .filter((message) => message.role === "tool")
+    .map((message, index) => `Tool result ${index + 1}:\n\n${message.text}`)
+    .join("\n\n");
+  const conversationUpdates = updates.filter(
+    (message) => message.role === "user",
   );
+
+  return {
+    toolResults,
+    update: conversationUpdates.map((message) => message.text).join("\n\n"),
+  };
 }
 
-function formatTools(tools: OpenCodeTool[]): string {
+export function formatTools(tools: OpenCodeTool[]): string {
   if (tools.length === 0) return "No tools are available for this turn.";
 
   return tools
+    .map(presentOpenCodeTool)
     .map((tool) => {
       const sections = [`name: ${tool.name}`];
       if (tool.description) sections.push(`description:\n${tool.description}`);
@@ -214,6 +239,52 @@ function formatTools(tools: OpenCodeTool[]): string {
       return sections.join("\n");
     })
     .join("\n\n");
+}
+
+function formatCompactTools(tools: OpenCodeTool[]): string {
+  if (tools.length === 0) return "No tools are available for this turn.";
+  return `Available tool names: ${tools.map((tool) => tool.name).join(", ")}. If you need details for a tool, call listtools with its name.`;
+}
+
+function isInitialTurn(messages: OpenCodeChatMessage[]): boolean {
+  return !messages.some(
+    (message) => message.role === "assistant" || message.role === "tool",
+  );
+}
+
+function shouldIncludeAgentInstructions(
+  messages: OpenCodeChatMessage[],
+): boolean {
+  if (isInitialTurn(messages)) return true;
+
+  const conversation = messages.filter(
+    (message) => message.role !== "system" && message.role !== "developer",
+  );
+  const currentStart = newestTurnStart(conversation);
+  const previousTokens = estimateTokens(conversation.slice(0, currentStart));
+  const currentTokens = estimateTokens(conversation);
+
+  return (
+    Math.floor(previousTokens / agentInstructionsTokenInterval) <
+    Math.floor(currentTokens / agentInstructionsTokenInterval)
+  );
+}
+
+function newestTurnStart(messages: OpenCodeChatMessage[]): number {
+  if (messages.at(-1)?.role === "tool") {
+    let index = messages.length - 1;
+    while (index > 0 && messages[index - 1].role === "tool") index -= 1;
+    return index;
+  }
+  return Math.max(0, messages.length - 1);
+}
+
+function estimateTokens(messages: OpenCodeChatMessage[]): number {
+  const characters = messages.reduce(
+    (total, message) => total + message.text.length,
+    0,
+  );
+  return Math.floor(characters / 4);
 }
 
 function formatSection(label: string, source: string): string {
