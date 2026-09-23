@@ -199,6 +199,22 @@ export async function readComposerState(): Promise<ComposerState> {
   return decodeComposerState(JSON.parse(raw) as unknown);
 }
 
+export async function scrollToBottom(): Promise<void> {
+  await callBridge(["scroll-to-bottom"]);
+}
+
+export async function shouldScrollToBottom(): Promise<boolean> {
+  const raw = await callBridge(["assistant-state"]);
+  try {
+    return (
+      (JSON.parse(raw) as { scrollToBottomVisible?: unknown })
+        .scrollToBottomVisible === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 export type GuardedSubmissionResult = {
   status: "submitted" | "busy" | "unavailable";
 };

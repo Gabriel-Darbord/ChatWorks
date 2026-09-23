@@ -4,6 +4,7 @@ import test from "node:test";
 import { parseMessage } from "../src/core/message.ts";
 import {
   completeOpenCodeRequest,
+  createOpenCodeProviderState,
   type ClassicProviderGateway,
 } from "../src/providers/opencode-provider.ts";
 
@@ -88,9 +89,9 @@ test("returns a Classic-generated OpenCode title", async () => {
   assert.match(fixture.prompts[0], /title generator/);
 });
 
-test("serves an individual tool schema through listtools", async () => {
+test("serves the full tool catalog through listtools", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"listtools","input":{"name":"read"}}\n```',
+    '```tools\n{"name":"listtools","input":{}}\n```',
     '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
   );
 
@@ -107,11 +108,71 @@ test("serves an individual tool schema through listtools", async () => {
   );
 
   assert.equal(fixture.prompts.length, 2);
-  assert.doesNotMatch(fixture.prompts[0], /input schema/);
+  assert.doesNotMatch(fixture.prompts[0], /input schema:/);
   assert.match(fixture.prompts[0], /call listtools/);
+  assert.match(fixture.prompts[1], /Full tool catalog requested/);
   assert.match(fixture.prompts[1], /name: read/);
   assert.match(fixture.prompts[1], /input schema/);
   assert.equal(result.choices[0].message.tool_calls?.[0].function.name, "read");
+});
+
+test("composes listtools with surrounding real tool calls", async () => {
+  const fixture = gateway(
+    '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n{"name":"listtools","input":{}}\n{"name":"read","input":{"path":"src/b.ts"}}\n```',
+    "Done.",
+  );
+  const state = createOpenCodeProviderState();
+  const continuedRequest = {
+    ...request,
+    messages: [
+      { role: "user", content: "Inspect both files." },
+      { role: "assistant", content: "I will inspect them." },
+      { role: "user", content: "Continue." },
+    ],
+  };
+
+  const first = await completeOpenCodeRequest(
+    continuedRequest,
+    fixture.gateway,
+    undefined,
+    state,
+  );
+  const calls = first.choices[0].message.tool_calls ?? [];
+
+  assert.equal(fixture.prompts.length, 1);
+  assert.deepEqual(
+    calls.map((call) => call.function.name),
+    ["read", "read"],
+  );
+
+  const second = await completeOpenCodeRequest(
+    {
+      ...continuedRequest,
+      messages: [
+        ...continuedRequest.messages,
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: calls,
+        },
+        { role: "tool", tool_call_id: calls[0].id, content: "result A" },
+        { role: "tool", tool_call_id: calls[1].id, content: "result B" },
+      ],
+    },
+    fixture.gateway,
+    undefined,
+    state,
+  );
+
+  assert.equal(second.choices[0].message.content, "Done.");
+  assert.equal(fixture.prompts.length, 2);
+  const followUp = fixture.prompts[1];
+  const catalogIndex = followUp.indexOf("Full tool catalog requested");
+  const resultAIndex = followUp.indexOf("result A");
+  const resultBIndex = followUp.indexOf("result B");
+  assert.ok(catalogIndex >= 0);
+  assert.ok(catalogIndex < resultAIndex);
+  assert.ok(resultAIndex < resultBIndex);
 });
 
 test("repairs an invalid block before returning a response", async () => {

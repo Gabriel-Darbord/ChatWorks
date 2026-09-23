@@ -4,6 +4,7 @@ import type { OpenCodeTool } from "./opencode-tools.ts";
 export type OpenCodeChatMessage = {
   role: "system" | "developer" | "user" | "assistant" | "tool";
   text: string;
+  toolCallId?: string;
 };
 
 export type OpenCodeProviderRequest = {
@@ -52,6 +53,7 @@ const agentInstructionsTokenInterval = 12_000;
 export function compileClassicTurn(
   request: OpenCodeProviderRequest,
   includeToolCatalog = isInitialTurn(request.messages),
+  internalToolResults: string[] = [],
 ): CompiledClassicTurn {
   const { toolResults, update } = newestConversationUpdate(request.messages);
   const system = request.messages.filter(
@@ -62,14 +64,16 @@ export function compileClassicTurn(
   const sections = [
     [
       "You are the model for one coding-agent turn.",
-      "To request or perform any operation, your response MUST contain exactly one fenced `tools` block. This is the only way to invoke tools.",
-      "When invoking tools:",
-      "- Use exactly one fenced block in your entire response: the `tools` block.",
-      "- Do not use any other fenced blocks.",
+      "You have access to the tools listed below. Use them when needed to complete the user's request. A tool call is performed by writing it in a fenced `tools` block. Tool calls will be executed and their results returned to you so you can continue the task.",
+      // "Use them when needed to complete the user's request." -> "Use tools rather than claiming you cannot access the environment."?
+      "When the user's request requires investigation, implementation, verification, or another operation, continue using the available tools until the requested work is complete or you are genuinely blocked by information or action only the user can provide. Do not stop merely because you have partial findings, an intermediate result, or a clear next step. If further available tool calls can materially advance the request, make them instead of ending the turn.",
+      "When using tools:",
+      "- Emit exactly one fenced `tools` block in your response.",
+      "- Do not use any other fenced blocks in that response.",
       "- You may include ordinary prose outside the `tools` block.",
-      "- Put multiple tool calls in the same `tools` block, one JSON object with `name` and `input` fields per line, in execution order.",
-      "- Batch only independent operations; prefer fewer calls when later work depends on an earlier result.",
-      "- Only use the available tools.",
+      "- Write one JSON object with `name` and `input` fields per tool call, one per line.",
+      "- Put multiple independent tool calls in the same block. When a later call depends on an earlier result, wait for that result before requesting it.",
+      "- Only call tools listed under Active tools.",
     ].join("\n"),
     includeToolCatalog
       ? formatSection("Active tools", formatTools(request.tools))
@@ -85,9 +89,13 @@ export function compileClassicTurn(
     );
   }
 
+  sections.push(...internalToolResults);
   if (toolResults.length > 0) sections.push(toolResults);
-  sections.push("EVERYTHING BELOW IS CONVERSATION UPDATE:");
-  sections.push(update);
+
+  if (update.length > 0) {
+    sections.push("EVERYTHING BELOW IS CONVERSATION UPDATE:");
+    sections.push(update);
+  }
 
   return { prompt: sections.join("\n\n"), tools: request.tools };
 }
@@ -107,12 +115,21 @@ function decodeMessage(value: unknown, index: number): OpenCodeChatMessage {
     );
   }
 
+  const toolCallId =
+    message.tool_call_id === undefined
+      ? undefined
+      : string(
+        message.tool_call_id,
+        `Chat completion message ${index + 1} tool call id`,
+      );
+
   return {
     role,
     text: decodeContent(
       message.content,
       `Chat completion message ${index + 1}`,
     ),
+    ...(toolCallId ? { toolCallId } : {}),
   };
 }
 
@@ -135,16 +152,16 @@ function decodeTools(value: unknown): OpenCodeTool[] {
       definition.description === undefined
         ? undefined
         : string(
-            definition.description,
-            `Chat completion tool ${index + 1} function description`,
-          );
+          definition.description,
+          `Chat completion tool ${index + 1} function description`,
+        );
     const parameters =
       definition.parameters === undefined
         ? undefined
         : record(
-            definition.parameters,
-            `Chat completion tool ${index + 1} parameters`,
-          );
+          definition.parameters,
+          `Chat completion tool ${index + 1} parameters`,
+        );
     const required = parameters?.required;
     if (
       required !== undefined &&
@@ -161,11 +178,11 @@ function decodeTools(value: unknown): OpenCodeTool[] {
       ...(description ? { description } : {}),
       ...(parameters
         ? {
-            input: {
-              ...(Array.isArray(required) ? { required } : {}),
-              schema: parameters,
-            },
-          }
+          input: {
+            ...(Array.isArray(required) ? { required } : {}),
+            schema: parameters,
+          },
+        }
         : {}),
     };
   });
@@ -243,7 +260,7 @@ export function formatTools(tools: OpenCodeTool[]): string {
 
 function formatCompactTools(tools: OpenCodeTool[]): string {
   if (tools.length === 0) return "No tools are available for this turn.";
-  return `Available tool names: ${tools.map((tool) => tool.name).join(", ")}. If you need details for a tool, call listtools with its name.`;
+  return `Available tool names: ${tools.map((tool) => tool.name).join(", ")}. If you need the full tool definitions and input schemas, call listtools with an empty input object.`;
 }
 
 function isInitialTurn(messages: OpenCodeChatMessage[]): boolean {
@@ -288,7 +305,7 @@ function estimateTokens(messages: OpenCodeChatMessage[]): number {
 }
 
 function formatSection(label: string, source: string): string {
-  return `${label}:\n\n\`\`\`text\n${source}\n\`\`\``;
+  return `${label}:\n\`\`\`text\n${source}\n\`\`\``;
 }
 
 function array(value: unknown, label: string): unknown[] {

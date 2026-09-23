@@ -21,16 +21,28 @@ function observation(
 function operations(
   observations: Array<AssistantObservation | undefined>,
   availability: boolean[] = [],
-): { operations: ClassicProviderOperations; prompts: string[] } {
+  scrollNeeded: boolean[] = [],
+): {
+  operations: ClassicProviderOperations;
+  prompts: string[];
+  scrolls: number[];
+} {
   const prompts: string[] = [];
+  const scrolls: number[] = [];
   return {
     prompts,
+    scrolls,
     operations: {
       async observeAssistant() {
         return observations.shift();
       },
       async composerAvailable() {
         return availability.shift() ?? true;
+      },
+      async maintainBottom() {
+        const needed = scrollNeeded.shift() ?? false;
+        if (needed) scrolls.push(scrolls.length + 1);
+        return needed;
       },
       async submit(prompt) {
         prompts.push(prompt);
@@ -139,4 +151,47 @@ test("surfaces a busy composer without waiting for a response", async () => {
     gateway.sendAndRead("Provider prompt"),
     /composer is busy/,
   );
+});
+
+test("stabilizes only observations made after the composer becomes available", async () => {
+  const fixture = operations(
+    [
+      observation("Old response"),
+      observation("Partial response"),
+      observation("Partial response"),
+      observation("Final response"),
+      observation("Final response"),
+    ],
+    [false, true, true, true],
+  );
+  const gateway = classicProviderGateway(fixture.operations, {
+    pollMilliseconds: 0,
+    timeoutMilliseconds: 100,
+  });
+
+  const result = await gateway.sendAndRead("Provider prompt");
+
+  assert.equal(result.raw, "Final response");
+});
+
+test("repeatedly restores the bottom viewport while waiting", async () => {
+  const fixture = operations(
+    [
+      observation("Old response"),
+      observation("Partial response"),
+      observation("Final response"),
+      observation("Final response"),
+    ],
+    [false, true, true],
+    [true, true, false],
+  );
+  const gateway = classicProviderGateway(fixture.operations, {
+    pollMilliseconds: 0,
+    timeoutMilliseconds: 100,
+  });
+
+  const result = await gateway.sendAndRead("Provider prompt");
+
+  assert.equal(result.raw, "Final response");
+  assert.equal(fixture.scrolls.length, 2);
 });

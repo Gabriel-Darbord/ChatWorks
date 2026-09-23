@@ -47,6 +47,7 @@ test("compiles the current request, active tool schemas, and newest context", ()
   assert.match(compiled.prompt, /name: read/);
   assert.match(compiled.prompt, /Work carefully\./);
   assert.match(compiled.prompt, /src\/app\.ts contains one TODO\./);
+  assert.equal(request.messages[3].toolCallId, "call_1");
   assert.doesNotMatch(compiled.prompt, /Old request/);
 });
 
@@ -72,9 +73,9 @@ test("uses only compact tool discovery after the initial turn", () => {
 
   const prompt = compileClassicTurn(request).prompt;
   assert.match(prompt, /Available tool names: read/);
-  assert.match(prompt, /call listtools/);
+  assert.match(prompt, /call listtools with an empty input object/);
   assert.doesNotMatch(prompt, /deliberately verbose/);
-  assert.doesNotMatch(prompt, /input schema/);
+  assert.doesNotMatch(prompt, /input schema:/);
 });
 
 test("repeats agent instructions only when estimated conversation tokens cross the interval", () => {

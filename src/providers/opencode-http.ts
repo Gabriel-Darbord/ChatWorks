@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import {
   completeOpenCodeRequest,
+  createOpenCodeProviderState,
   type ClassicProviderGateway,
   type OpenAICompletion,
 } from "./opencode-provider.ts";
@@ -18,6 +19,7 @@ export function createOpenCodeProviderServer(
 ): Server {
   let pending = Promise.resolve();
   let requestCount = 0;
+  const providerState = createOpenCodeProviderState();
   const complete = <T>(work: () => Promise<T>): Promise<T> => {
     const result = pending.then(work, work);
     pending = result.then(
@@ -73,7 +75,12 @@ export function createOpenCodeProviderServer(
           correlationId,
           fields: { queueMs: Date.now() - startedAt },
         });
-        return completeOpenCodeRequest(body, gateway, correlationId);
+        return completeOpenCodeRequest(
+          body,
+          gateway,
+          correlationId,
+          providerState,
+        );
       });
       await logDebug("provider", "opencode-output", {
         correlationId,

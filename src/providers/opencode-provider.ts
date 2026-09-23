@@ -16,11 +16,10 @@ const repairLimit = 2;
 const listToolsTool = {
   name: "listtools",
   input: {
-    required: ["name"],
     schema: {
       type: "object",
-      properties: { name: { type: "string" } },
-      required: ["name"],
+      properties: {},
+      additionalProperties: false,
     },
   },
 };
@@ -28,6 +27,14 @@ const listToolsTool = {
 export type ClassicProviderGateway = {
   sendAndRead(prompt: string, correlationId?: string): Promise<Message>;
 };
+
+export type OpenCodeProviderState = {
+  pendingToolCatalogs: Map<string, string>;
+};
+
+export function createOpenCodeProviderState(): OpenCodeProviderState {
+  return { pendingToolCatalogs: new Map() };
+}
 
 export type OpenAICompletion = {
   id: string;
@@ -53,10 +60,20 @@ export async function completeOpenCodeRequest(
   value: unknown,
   gateway: ClassicProviderGateway,
   correlationId?: string,
+  state: OpenCodeProviderState = createOpenCodeProviderState(),
 ): Promise<OpenAICompletion> {
   const request = decodeOpenCodeProviderRequest(value);
   const turn = providerTurnId(request);
-  const compiled = compileClassicTurn(request);
+  const pendingCatalogs = request.messages.flatMap((message) => {
+    if (!message.toolCallId) return [];
+    const catalog = state.pendingToolCatalogs.get(message.toolCallId);
+    if (!catalog) return [];
+    state.pendingToolCatalogs.delete(message.toolCallId);
+    return [catalog];
+  });
+  const compiled = compileClassicTurn(request, undefined, [
+    ...new Set(pendingCatalogs),
+  ]);
   let prompt = compiled.prompt;
 
   for (let repairCount = 0; repairCount <= repairLimit; repairCount += 1) {
@@ -74,20 +91,28 @@ export async function completeOpenCodeRequest(
       [...compiled.tools, listToolsTool],
       turn,
     );
-    if (
-      result.kind === "tool-calls" &&
-      result.calls.length === 1 &&
-      result.calls[0].name === "listtools"
-    ) {
-      const requestedName = result.calls[0].input.name;
-      const requestedTool = compiled.tools.find(
-        (tool) => tool.name === requestedName,
+    if (result.kind === "tool-calls") {
+      const requestedCatalog = result.calls.some(
+        (call) => call.name === "listtools",
       );
-      prompt = requestedTool
-        ? `Tool definition requested:\n\n${formatTools([requestedTool])}\n\nContinue the current task. Invoke tools only with a fenced \`tools\` block.`
-        : `No tool named ${JSON.stringify(requestedName)} is available. Available tool names: ${compiled.tools.map((tool) => tool.name).join(", ")}. Continue the current task.`;
-      repairCount -= 1;
-      continue;
+      if (requestedCatalog) {
+        const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`;
+        const realCalls = result.calls.filter(
+          (call) => call.name !== "listtools",
+        );
+        if (realCalls.length === 0) {
+          prompt = `${catalog}\n\nContinue the current task. Invoke tools only with a fenced \`tools\` block.`;
+          repairCount -= 1;
+          continue;
+        }
+        for (const call of realCalls) {
+          state.pendingToolCatalogs.set(call.id, catalog);
+        }
+        return completion(request.model, turn, {
+          ...result,
+          calls: realCalls,
+        });
+      }
     }
     if (result.kind !== "repair")
       return completion(request.model, turn, result);

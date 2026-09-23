@@ -3,6 +3,8 @@ import {
   NoAssistantMessageError,
   readAccessibilityAssistantObservation,
   readComposerState,
+  scrollToBottom,
+  shouldScrollToBottom,
 } from "../adapters/chatgpt-bridge.ts";
 import {
   sameAssistantMessage,
@@ -15,6 +17,7 @@ import type { ClassicProviderGateway } from "./opencode-provider.ts";
 export type ClassicProviderOperations = {
   observeAssistant(): Promise<AssistantObservation | undefined>;
   composerAvailable(): Promise<boolean>;
+  maintainBottom(): Promise<boolean>;
   submit(prompt: string): Promise<"submitted" | "busy" | "unavailable">;
   wait(milliseconds: number): Promise<void>;
 };
@@ -78,6 +81,13 @@ async function waitForNewAssistantMessage(
 
   while (Date.now() < deadline) {
     poll += 1;
+    const scrolled = await operations.maintainBottom();
+    if (scrolled) {
+      await logDebug("classic", "scrolled-to-bottom", {
+        correlationId,
+        fields: { poll },
+      });
+    }
     const observation = await operations.observeAssistant();
     await logDebug("classic", "observation", {
       correlationId,
@@ -108,7 +118,7 @@ async function waitForNewAssistantMessage(
       fields: { poll, available: composerAvailable },
     });
     if (!composerAvailable) {
-      candidate = observation;
+      candidate = undefined;
       await operations.wait(pollMilliseconds);
       continue;
     }
@@ -149,6 +159,11 @@ function accessibilityOperations(): ClassicProviderOperations {
     },
     async composerAvailable() {
       return (await readComposerState()).availability === "available";
+    },
+    async maintainBottom() {
+      if (!(await shouldScrollToBottom())) return false;
+      await scrollToBottom();
+      return true;
     },
     async submit(prompt) {
       return (await guardedStageAndSend(prompt)).status;
