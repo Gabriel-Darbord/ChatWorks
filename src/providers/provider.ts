@@ -123,8 +123,11 @@ export async function completeProviderRequest(
       toolAdapter,
     );
 
+    if (result.kind !== "repair" && result.text) {
+      onIntermediate?.(result.text);
+    }
+
     if (result.kind === "text") {
-      if (result.text) onIntermediate?.(result.text);
       prompt = [
         "The coding-agent turn is still active. Continue working on the current task: reason through what remains, investigate or verify assumptions, and use the available tools whenever they can materially advance the work. Do not stop merely because you have an intermediate result or no immediate tool call to make.",
         "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish`. Do this by including the following `tools` block verbatim:",

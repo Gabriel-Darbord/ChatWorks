@@ -102,7 +102,7 @@ export function createProviderServer(
         fields: { durationMs: Date.now() - startedAt },
       });
       if (streaming) {
-        respondStream(response, completion, false);
+        respondStream(response, completion, false, false);
       } else {
         respondJson(response, 200, completion);
       }
@@ -210,24 +210,27 @@ function respondStream(
   response: ServerResponse,
   completion: OpenAICompletion,
   writeHeaders = true,
+  writeContent = true,
 ): void {
   if (writeHeaders) beginStream(response);
 
   const choice = completion.choices[0];
   if (choice.finish_reason === "tool_calls") {
-    writeEvent(response, {
-      id: completion.id,
-      object: "chat.completion.chunk",
-      created: completion.created,
-      model: completion.model,
-      choices: [
-        {
-          index: 0,
-          delta: { role: "assistant", content: choice.message.content },
-          finish_reason: null,
-        },
-      ],
-    });
+    if (writeContent && choice.message.content) {
+      writeEvent(response, {
+        id: completion.id,
+        object: "chat.completion.chunk",
+        created: completion.created,
+        model: completion.model,
+        choices: [
+          {
+            index: 0,
+            delta: { role: "assistant", content: choice.message.content },
+            finish_reason: null,
+          },
+        ],
+      });
+    }
     writeEvent(response, {
       id: completion.id,
       object: "chat.completion.chunk",
@@ -241,7 +244,7 @@ function respondStream(
         },
       ],
     });
-  } else {
+  } else if (writeContent && choice.message.content) {
     writeEvent(response, {
       id: completion.id,
       object: "chat.completion.chunk",

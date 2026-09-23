@@ -198,7 +198,7 @@ test("allows finish with an empty final response", async () => {
   assert.equal(result.choices[0].finish_reason, "stop");
 });
 
-test("continues internally when Classic returns prose without finish", async () => {
+test("emits all Classic prose while continuing internally until finish", async () => {
   const fixture = gateway(
     "Partial finding.",
     'Done.\n\n```tools\n{"name":"finish","input":{}}\n```',
@@ -215,7 +215,7 @@ test("continues internally when Classic returns prose without finish", async () 
 
   assert.equal(fixture.prompts.length, 2);
   assert.match(fixture.prompts[1], /coding-agent turn is still active/i);
-  assert.deepEqual(intermediate, ["Partial finding."]);
+  assert.deepEqual(intermediate, ["Partial finding.", "Done."]);
   assert.equal(result.choices[0].message.content, "Done.");
   assert.equal(result.choices[0].finish_reason, "stop");
 });

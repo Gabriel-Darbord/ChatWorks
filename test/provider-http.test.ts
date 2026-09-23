@@ -128,10 +128,9 @@ test("streams tool calls in OpenAI-compatible SSE", async () => {
       const body = await response.text();
       assert.match(body, /"tool_calls"/);
       assert.match(body, /"finish_reason":"tool_calls"/);
-      assert.ok(
-        body.indexOf('"content":"I will inspect it."') <
-          body.indexOf('"tool_calls"'),
-      );
+      const prose = '"content":"I will inspect it."';
+      assert.equal(body.split(prose).length - 1, 1);
+      assert.ok(body.indexOf(prose) < body.indexOf('"tool_calls"'));
       assert.match(body, /data: \[DONE\]/);
     },
   );
@@ -156,6 +155,8 @@ test("streams prose-only internal iterations before the final response", async (
       const finalIndex = body.indexOf('"content":"Done."');
       assert.ok(intermediateIndex >= 0);
       assert.ok(intermediateIndex < finalIndex);
+      assert.equal(body.split('"content":"Partial finding."').length - 1, 1);
+      assert.equal(body.split('"content":"Done."').length - 1, 1);
       assert.match(
         body,
         /"content":"Partial finding\."[^\n]*"finish_reason":null/,
