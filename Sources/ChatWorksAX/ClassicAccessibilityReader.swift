@@ -3,132 +3,42 @@ import Foundation
 
 /// ChatGPT Classic exposes assistant code as a heading such as "Bash code
 /// block" followed by the exact source in an AXStaticText sibling.
+struct ClassicAccessibilityElementSnapshot {
+  let role: String?
+  let description: String?
+  let frame: CGRect?
+  let parentTraversalIndex: Int?
+}
+
 struct ClassicAccessibilityReader {
   let application: AXUIElement
 
   func latestParts() -> [AccessibilityMessagePart] {
-    let elements = descendants(of: application)
-    guard let conversationFrame = conversationFrame(in: elements) else { return [] }
-    let assistantLaneEnd = conversationFrame.minX + conversationFrame.width / 3
+    let elements = descendantSnapshots(of: application)
     guard
-      let latestUserContent = elements.lastIndex(where: {
-        isUserStaticText($0, assistantLaneEnd: assistantLaneEnd)
-      })
-    else { return [] }
-
-    return assistantParts(
-      in: Array(elements.dropFirst(latestUserContent + 1)),
-      assistantLaneEnd: assistantLaneEnd
-    )
-  }
-
-  private func isCodeBlockHeading(_ element: AXUIElement) -> Bool {
-    guard role(of: element) == kAXHeadingRole,
-      let description = stringAttribute(kAXDescriptionAttribute, of: element)
-    else { return false }
-    return description.localizedCaseInsensitiveContains(" code block")
-  }
-
-  private func language(of element: AXUIElement) -> String? {
-    guard let description = stringAttribute(kAXDescriptionAttribute, of: element),
-      let marker = description.range(of: " code block", options: .caseInsensitive)
-    else { return nil }
-    let language = description[..<marker.lowerBound]
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-      .lowercased()
-    return language.isEmpty ? nil : language
-  }
-
-  private func isStaticText(_ element: AXUIElement) -> Bool {
-    role(of: element) == kAXStaticTextRole
-  }
-
-  private func assistantParts(
-    in elements: [AXUIElement],
-    assistantLaneEnd: CGFloat
-  ) -> [AccessibilityMessagePart] {
-    var parts: [PositionedAccessibilityMessagePart] = []
-    var index = 0
-
-    while index < elements.count {
-      let element = elements[index]
-      if isCodeBlockHeading(element),
-        isAssistantElement(element, assistantLaneEnd: assistantLaneEnd),
-        let sourceIndex = elements[(index + 1)...].indices.first(where: {
-          isStaticText(elements[$0])
-            && isAssistantElement(elements[$0], assistantLaneEnd: assistantLaneEnd)
-        }),
-        let source = staticText(of: elements[sourceIndex])
-      {
-        if let position = frame(of: element) {
-          parts.append(
-            PositionedAccessibilityMessagePart(
-              y: position.minY,
-              traversalIndex: index,
-              part: .code(language: language(of: element), source: source)
-            )
-          )
-        }
-        index = sourceIndex + 1
-        continue
-      }
-
-      if isStaticText(element), isAssistantElement(element, assistantLaneEnd: assistantLaneEnd),
-        let text = staticText(of: element)
-      {
-        if let position = frame(of: element) {
-          parts.append(
-            PositionedAccessibilityMessagePart(
-              y: position.minY,
-              traversalIndex: index,
-              part: .text(text)
-            )
-          )
-        }
-      }
-      index += 1
-    }
-
-    return accessibilityMessagePartsInVisualOrder(parts)
-  }
-
-  private func isUserStaticText(_ element: AXUIElement, assistantLaneEnd: CGFloat) -> Bool {
-    guard isStaticText(element), let frame = frame(of: element) else { return false }
-    return frame.minX >= assistantLaneEnd && staticText(of: element) != nil
-  }
-
-  private func isAssistantElement(_ element: AXUIElement, assistantLaneEnd: CGFloat) -> Bool {
-    guard let frame = frame(of: element) else { return false }
-    return frame.minX < assistantLaneEnd
-  }
-
-  private func staticText(of element: AXUIElement) -> String? {
-    guard let value = stringAttribute(kAXDescriptionAttribute, of: element) else { return nil }
-    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed.isEmpty ? nil : trimmed
-  }
-
-  private func conversationFrame(in elements: [AXUIElement]) -> CGRect? {
-    guard
-      let frame =
+      let conversationFrame =
         elements
-        .filter(isConversationList)
-        .compactMap(frame)
+        .filter({ $0.role == kAXListRole })
+        .compactMap(\.frame)
         .max(by: {
           $0.width == $1.width
             ? $0.width * $0.height < $1.width * $1.height
             : $0.width < $1.width
         })
-    else { return nil }
-    return frame
-  }
+    else { return [] }
+    let assistantLaneEnd = conversationFrame.minX + conversationFrame.width / 3
+    guard
+      let latestUserContent = elements.lastIndex(where: {
+        $0.role == kAXStaticTextRole
+          && isUserElement($0, assistantLaneEnd: assistantLaneEnd)
+          && staticText(of: $0) != nil
+      })
+    else { return [] }
 
-  private func isConversationList(_ element: AXUIElement) -> Bool {
-    role(of: element) == kAXListRole
-  }
-
-  private func role(of element: AXUIElement) -> String? {
-    stringAttribute(kAXRoleAttribute, of: element)
+    return classicAssistantParts(
+      in: Array(elements.dropFirst(latestUserContent + 1)),
+      assistantLaneEnd: assistantLaneEnd
+    )
   }
 
   private func frame(of element: AXUIElement) -> CGRect? {
@@ -152,19 +62,38 @@ struct ClassicAccessibilityReader {
     return CGRect(origin: position, size: size)
   }
 
-  private func descendants(of root: AXUIElement, limit: Int = 5_000) -> [AXUIElement] {
-    var result: [AXUIElement] = []
-    var pending = [root]
+  private func descendantSnapshots(
+    of root: AXUIElement,
+    limit: Int = 5_000
+  ) -> [ClassicAccessibilityElementSnapshot] {
+    var result: [ClassicAccessibilityElementSnapshot] = []
+    var pending: [(element: AXUIElement, parentTraversalIndex: Int?)] = [(root, nil)]
 
     while let next = pending.popLast(), result.count < limit {
-      result.append(next)
+      let traversalIndex = result.count
+      result.append(
+        ClassicAccessibilityElementSnapshot(
+          role: stringAttribute(kAXRoleAttribute, of: next.element),
+          description: stringAttribute(kAXDescriptionAttribute, of: next.element),
+          frame: frame(of: next.element),
+          parentTraversalIndex: next.parentTraversalIndex
+        )
+      )
       var childrenValue: CFTypeRef?
       guard
-        AXUIElementCopyAttributeValue(next, kAXChildrenAttribute as CFString, &childrenValue)
+        AXUIElementCopyAttributeValue(
+          next.element,
+          kAXChildrenAttribute as CFString,
+          &childrenValue
+        )
           == .success,
         let children = childrenValue as? [AXUIElement]
       else { continue }
-      pending.append(contentsOf: children.reversed())
+      pending.append(
+        contentsOf: children.reversed().map {
+          (element: $0, parentTraversalIndex: traversalIndex)
+        }
+      )
     }
     return result
   }
@@ -176,4 +105,91 @@ struct ClassicAccessibilityReader {
     }
     return value as? String
   }
+}
+
+func classicAssistantParts(
+  in elements: [ClassicAccessibilityElementSnapshot],
+  assistantLaneEnd: CGFloat
+) -> [AccessibilityMessagePart] {
+  var parts: [PositionedAccessibilityMessagePart] = []
+  var consumedCodeSources: Set<Int> = []
+
+  for (index, element) in elements.enumerated() {
+    if consumedCodeSources.contains(index) { continue }
+
+    if isCodeBlockHeading(element),
+      isAssistantElement(element, assistantLaneEnd: assistantLaneEnd),
+      let sourceIndex = elements[(index + 1)...].indices.first(where: {
+        elements[$0].parentTraversalIndex == element.parentTraversalIndex
+          && elements[$0].role == kAXStaticTextRole
+          && isAssistantElement(elements[$0], assistantLaneEnd: assistantLaneEnd)
+          && staticText(of: elements[$0]) != nil
+      }),
+      let source = staticText(of: elements[sourceIndex]),
+      let frame = element.frame
+    {
+      consumedCodeSources.insert(sourceIndex)
+      parts.append(
+        PositionedAccessibilityMessagePart(
+          y: frame.minY,
+          traversalIndex: index,
+          part: .code(language: codeLanguage(of: element), source: source)
+        )
+      )
+      continue
+    }
+
+    if element.role == kAXStaticTextRole,
+      isAssistantElement(element, assistantLaneEnd: assistantLaneEnd),
+      let text = staticText(of: element),
+      let frame = element.frame
+    {
+      parts.append(
+        PositionedAccessibilityMessagePart(
+          y: frame.minY,
+          traversalIndex: index,
+          part: .text(text)
+        )
+      )
+    }
+  }
+
+  return accessibilityMessagePartsInVisualOrder(parts)
+}
+
+private func isCodeBlockHeading(_ element: ClassicAccessibilityElementSnapshot) -> Bool {
+  element.role == kAXHeadingRole
+    && element.description?.localizedCaseInsensitiveContains(" code block") == true
+}
+
+private func codeLanguage(of element: ClassicAccessibilityElementSnapshot) -> String? {
+  guard let description = element.description,
+    let marker = description.range(of: " code block", options: .caseInsensitive)
+  else { return nil }
+  let language = description[..<marker.lowerBound]
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+    .lowercased()
+  return language.isEmpty ? nil : language
+}
+
+private func isUserElement(
+  _ element: ClassicAccessibilityElementSnapshot,
+  assistantLaneEnd: CGFloat
+) -> Bool {
+  guard let frame = element.frame else { return false }
+  return frame.minX >= assistantLaneEnd
+}
+
+private func isAssistantElement(
+  _ element: ClassicAccessibilityElementSnapshot,
+  assistantLaneEnd: CGFloat
+) -> Bool {
+  guard let frame = element.frame else { return false }
+  return frame.minX < assistantLaneEnd
+}
+
+private func staticText(of element: ClassicAccessibilityElementSnapshot) -> String? {
+  guard let value = element.description else { return nil }
+  let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+  return trimmed.isEmpty ? nil : trimmed
 }
