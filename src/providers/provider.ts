@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { messageText, type Message } from "../core/message.ts";
 import { logDebug } from "../core/diagnostics.ts";
 import {
@@ -7,7 +7,6 @@ import {
   formatCompactTools,
   formatSection,
   formatTools,
-  type ProviderRequest,
 } from "./provider-request.ts";
 import {
   identityProviderToolAdapter,
@@ -20,6 +19,8 @@ import {
 
 const repairLimit = 2;
 const internalTurnLimit = 16;
+const pendingStateLimit = 512;
+const pendingStateTtlMs = 30 * 60 * 1_000;
 const internalToolInput = {
   schema: {
     type: "object",
@@ -56,14 +57,23 @@ export type ClassicProviderGateway = {
 };
 
 export type ProviderState = {
-  pendingToolCatalogs: Map<string, string>;
-  pendingInternalResults: Map<string, string>;
+  pendingByToolCall: Map<
+    string,
+    {
+      createdAt: number;
+      toolCatalog?: string;
+      internalResult?: string;
+    }
+  >;
+  now: () => number;
 };
 
-export function createProviderState(): ProviderState {
+export function createProviderState(
+  now: () => number = Date.now,
+): ProviderState {
   return {
-    pendingToolCatalogs: new Map(),
-    pendingInternalResults: new Map(),
+    pendingByToolCall: new Map(),
+    now,
   };
 }
 
@@ -96,21 +106,21 @@ export async function completeProviderRequest(
   toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
 ): Promise<OpenAICompletion> {
   const request = decodeProviderRequest(value);
-  const turn = providerTurnId(request);
-  const pendingCatalogs = request.messages.flatMap((message) => {
+  const turn = providerTurnId();
+  prunePendingState(state);
+  const pendingContexts = request.messages.flatMap((message) => {
     if (!message.toolCallId) return [];
-    const catalog = state.pendingToolCatalogs.get(message.toolCallId);
-    if (!catalog) return [];
-    state.pendingToolCatalogs.delete(message.toolCallId);
-    return [catalog];
+    const context = state.pendingByToolCall.get(message.toolCallId);
+    if (!context) return [];
+    state.pendingByToolCall.delete(message.toolCallId);
+    return [context];
   });
-  const pendingInternalResults = request.messages.flatMap((message) => {
-    if (!message.toolCallId) return [];
-    const internalResult = state.pendingInternalResults.get(message.toolCallId);
-    if (!internalResult) return [];
-    state.pendingInternalResults.delete(message.toolCallId);
-    return [internalResult];
-  });
+  const pendingCatalogs = pendingContexts.flatMap((context) =>
+    context.toolCatalog ? [context.toolCatalog] : [],
+  );
+  const pendingInternalResults = pendingContexts.flatMap((context) =>
+    context.internalResult ? [context.internalResult] : [],
+  );
   const compiled = compileClassicTurn(
     request,
     undefined,
@@ -198,8 +208,10 @@ export async function completeProviderRequest(
         }
 
         for (const call of realCalls) {
-          state.pendingInternalResults.set(call.id, finishIgnored);
-          if (catalog) state.pendingToolCatalogs.set(call.id, catalog);
+          rememberPendingContext(state, call.id, {
+            internalResult: finishIgnored,
+            ...(catalog ? { toolCatalog: catalog } : {}),
+          });
         }
         return completion(request.model, turn, {
           ...result,
@@ -223,7 +235,7 @@ export async function completeProviderRequest(
         }
 
         for (const call of realCalls) {
-          state.pendingToolCatalogs.set(call.id, catalog);
+          rememberPendingContext(state, call.id, { toolCatalog: catalog });
         }
 
         return completion(request.model, turn, {
@@ -251,9 +263,35 @@ export async function completeProviderRequest(
   );
 }
 
-function providerTurnId(request: ProviderRequest): string {
-  const payload = JSON.stringify(request);
-  return createHash("sha256").update(payload).digest("hex").slice(0, 16);
+function rememberPendingContext(
+  state: ProviderState,
+  toolCallId: string,
+  context: { toolCatalog?: string; internalResult?: string },
+): void {
+  state.pendingByToolCall.set(toolCallId, {
+    createdAt: state.now(),
+    ...context,
+  });
+  prunePendingState(state);
+}
+
+function prunePendingState(state: ProviderState): void {
+  const expiredBefore = state.now() - pendingStateTtlMs;
+  for (const [toolCallId, context] of state.pendingByToolCall) {
+    if (context.createdAt < expiredBefore) {
+      state.pendingByToolCall.delete(toolCallId);
+    }
+  }
+
+  while (state.pendingByToolCall.size > pendingStateLimit) {
+    const oldestToolCallId = state.pendingByToolCall.keys().next().value;
+    if (oldestToolCallId === undefined) break;
+    state.pendingByToolCall.delete(oldestToolCallId);
+  }
+}
+
+function providerTurnId(): string {
+  return randomUUID().replaceAll("-", "");
 }
 
 function completion(

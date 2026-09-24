@@ -62,6 +62,22 @@ test("maps ordered Classic tool blocks to an OpenAI completion", async () => {
   );
 });
 
+test("uses distinct tool-call ids for identical provider requests", async () => {
+  const fixture = gateway(
+    '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
+    '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
+  );
+
+  const first = await completeProviderRequest(request, fixture.gateway);
+  const second = await completeProviderRequest(request, fixture.gateway);
+
+  assert.notEqual(
+    first.choices[0].message.tool_calls?.[0].id,
+    second.choices[0].message.tool_calls?.[0].id,
+  );
+  assert.notEqual(first.id, second.id);
+});
+
 test("returns a Classic-generated client title", async () => {
   const fixture = gateway(
     '```tools\n{"name":"finish","input":{"conclusion":"Available tools overview"}}\n```',
@@ -175,6 +191,47 @@ test("composes listtools with surrounding real tool calls", async () => {
   assert.ok(catalogIndex >= 0);
   assert.ok(catalogIndex < resultAIndex);
   assert.ok(resultAIndex < resultBIndex);
+});
+
+test("bounds and expires abandoned pending provider state", async () => {
+  let now = 1_000_000;
+  const state = createProviderState(() => now);
+  for (let index = 0; index < 600; index += 1) {
+    state.pendingByToolCall.set(`abandoned-${index}`, {
+      createdAt: now,
+      internalResult: `stale context ${index}`,
+    });
+  }
+  const fixture = gateway(
+    '```tools\n{"name":"finish","input":{"conclusion":"First."}}\n```',
+    '```tools\n{"name":"finish","input":{"conclusion":"Second."}}\n```',
+  );
+
+  await completeProviderRequest(request, fixture.gateway, undefined, state);
+  assert.equal(state.pendingByToolCall.size, 512);
+
+  now += 30 * 60 * 1_000 + 1;
+  await completeProviderRequest(
+    {
+      ...request,
+      messages: [
+        ...request.messages,
+        { role: "assistant", content: "Waiting for a tool." },
+        {
+          role: "tool",
+          tool_call_id: "abandoned-599",
+          content: "current result",
+        },
+      ],
+    },
+    fixture.gateway,
+    undefined,
+    state,
+  );
+
+  assert.equal(state.pendingByToolCall.size, 0);
+  assert.doesNotMatch(fixture.prompts[1], /stale context/);
+  assert.match(fixture.prompts[1], /current result/);
 });
 
 test("finishes internally with prose as the final response", async () => {
