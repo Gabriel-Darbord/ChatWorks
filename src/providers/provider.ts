@@ -19,6 +19,7 @@ import {
 } from "./provider-tools.ts";
 
 const repairLimit = 2;
+const internalTurnLimit = 16;
 const internalToolInput = {
   schema: {
     type: "object",
@@ -117,18 +118,23 @@ export async function completeProviderRequest(
     toolAdapter,
   );
   let prompt = compiled.prompt;
+  let repairCount = 0;
 
-  for (let repairCount = 0; repairCount <= repairLimit; repairCount += 1) {
+  for (
+    let internalTurn = 1;
+    internalTurn <= internalTurnLimit;
+    internalTurn += 1
+  ) {
     await logDebug("provider", "classic-input", {
       correlationId,
-      fields: { prompt, repairCount },
+      fields: { prompt, repairCount, internalTurn },
     });
 
     const message = await gateway.sendAndRead(prompt, correlationId);
 
     await logDebug("provider", "classic-output", {
       correlationId,
-      fields: { message: messageText(message), repairCount },
+      fields: { message: messageText(message), repairCount, internalTurn },
     });
 
     const result = parseProviderToolBlocks(
@@ -149,7 +155,6 @@ export async function completeProviderRequest(
         "",
         formatSection("Active tools", formatCompactTools(request.tools)),
       ].join("\n");
-      repairCount -= 1;
       continue;
     }
 
@@ -164,7 +169,6 @@ export async function completeProviderRequest(
           ) {
             prompt =
               "The `finish` conclusion must be a non-empty string. Continue the current task, then call `finish` with the final response in `input.conclusion`.";
-            repairCount -= 1;
             continue;
           }
           return completion(request.model, turn, {
@@ -190,7 +194,6 @@ export async function completeProviderRequest(
 
         if (realCalls.length === 0) {
           prompt = [catalog, finishIgnored].filter(Boolean).join("\n\n");
-          repairCount -= 1;
           continue;
         }
 
@@ -216,7 +219,6 @@ export async function completeProviderRequest(
 
         if (realCalls.length === 0) {
           prompt = `${catalog}\n\nContinue the current task. Invoke tools only with a fenced \`tools\` block.`;
-          repairCount -= 1;
           continue;
         }
 
@@ -240,10 +242,13 @@ export async function completeProviderRequest(
       );
     }
 
+    repairCount += 1;
     prompt = result.message;
   }
 
-  throw new Error("Unreachable provider repair state.");
+  throw new Error(
+    `ChatWorks stopped after ${internalTurnLimit} internal turns without a valid finish call.`,
+  );
 }
 
 function providerTurnId(request: ProviderRequest): string {

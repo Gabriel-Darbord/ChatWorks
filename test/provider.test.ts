@@ -225,6 +225,18 @@ test("emits all Classic prose while continuing internally until finish", async (
   assert.equal(result.choices[0].finish_reason, "stop");
 });
 
+test("bounds internal turns when Classic never finishes", async () => {
+  const fixture = gateway(
+    ...Array.from({ length: 16 }, () => "Still working."),
+  );
+
+  await assert.rejects(
+    completeProviderRequest(request, fixture.gateway),
+    /stopped after 16 internal turns without a valid finish call/,
+  );
+  assert.equal(fixture.prompts.length, 16);
+});
+
 test("ignores finish alongside another tool and executes the other tool", async () => {
   const fixture = gateway(
     'Still checking.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n{"name":"finish","input":{"conclusion":"Premature conclusion"}}\n```',
