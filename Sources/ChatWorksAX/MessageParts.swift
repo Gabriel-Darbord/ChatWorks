@@ -16,6 +16,23 @@ public struct AccessibilityMessagePart: Encodable {
   }
 }
 
+struct PositionedAccessibilityMessagePart {
+  let y: CGFloat
+  let traversalIndex: Int
+  let part: AccessibilityMessagePart
+}
+
+func accessibilityMessagePartsInVisualOrder(
+  _ parts: [PositionedAccessibilityMessagePart]
+) -> [AccessibilityMessagePart] {
+  parts
+    .sorted {
+      if $0.y == $1.y { return $0.traversalIndex < $1.traversalIndex }
+      return $0.y < $1.y
+    }
+    .map(\.part)
+}
+
 func accessibilityMessageText(_ parts: [AccessibilityMessagePart]) -> String {
   parts.compactMap { part in
     if part.kind == "text" {
