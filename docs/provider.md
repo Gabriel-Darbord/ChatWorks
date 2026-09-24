@@ -153,7 +153,7 @@ request_max_retries = 0
 stream_max_retries = 0
 ```
 
-The repository setup creates this profile at `$CODEX_HOME/chatworks.config.toml` when `$CODEX_HOME` is configured, or at `~/.codex/chatworks.config.toml` otherwise. Start ChatWorks, then run Codex with:
+Save this profile at `$CODEX_HOME/chatworks.config.toml` when `$CODEX_HOME` is configured, or at `~/.codex/chatworks.config.toml` otherwise. Start ChatWorks, then run Codex with:
 
 ```sh
 codex --profile chatworks
