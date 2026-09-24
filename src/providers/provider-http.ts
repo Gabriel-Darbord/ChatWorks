@@ -4,8 +4,9 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { randomUUID } from "node:crypto";
 import {
-  completeProviderRequest,
+  completeDecodedProviderRequest,
   createProviderState,
   type ClassicProviderGateway,
   type OpenAICompletion,
@@ -15,6 +16,12 @@ import {
   type ProviderToolAdapter,
 } from "./provider-tool-adapter.ts";
 import { decodeProviderRequest } from "./provider-request.ts";
+import {
+  completionOutputItems,
+  decodeResponsesRequest,
+  responseObject,
+  ResponsesEventStream,
+} from "./responses-api.ts";
 import { logDebug, logError, logEvent } from "../core/diagnostics.ts";
 
 const maxRequestBytes = 100_000_000;
@@ -39,6 +46,8 @@ export function createProviderServer(
     const requestId = ++requestCount;
     const startedAt = Date.now();
     let requestValidated = false;
+    let protocol: "chat-completions" | "responses" | undefined;
+    let responsesStream: ResponsesEventStream | undefined;
     const cancellation = new AbortController();
     const cancel = () => {
       if (cancellation.signal.aborted) return;
@@ -53,21 +62,23 @@ export function createProviderServer(
     response.once("close", cancelOnResponseClose);
 
     try {
-      if (request.method === "GET" && request.url === "/v1/models") {
-        respondJson(response, 200, {
-          object: "list",
-          data: [
-            {
-              id: "chatworks",
-              object: "model",
-              owned_by: "chatworks",
-            },
-          ],
-        });
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (request.method === "GET" && url.pathname === "/v1/models") {
+        respondJson(
+          response,
+          200,
+          url.searchParams.has("client_version")
+            ? codexModelCatalog()
+            : openAIModelCatalog(),
+        );
         return;
       }
 
-      if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      if (
+        request.method !== "POST" ||
+        (url.pathname !== "/v1/chat/completions" &&
+          url.pathname !== "/v1/responses")
+      ) {
         respondJson(response, 404, {
           error: {
             message: "ChatWorks provider route not found.",
@@ -79,8 +90,16 @@ export function createProviderServer(
 
       const correlationId = `provider-${requestId}`;
       const body = await readJson(request);
-      const streaming = streamRequested(body);
-      decodeProviderRequest(body);
+      protocol =
+        url.pathname === "/v1/responses" ? "responses" : "chat-completions";
+      const decoded =
+        protocol === "responses"
+          ? decodeResponsesRequest(body)
+          : {
+              request: decodeProviderRequest(body),
+              stream: streamRequested(body),
+            };
+      const { request: providerRequest, stream: streaming } = decoded;
       requestValidated = true;
       await logEvent("provider", "received", {
         correlationId,
@@ -93,22 +112,33 @@ export function createProviderServer(
         fields: { body: JSON.stringify(body) },
       });
       await logEvent("provider", "queued", { correlationId });
-      if (streaming) beginStream(response);
+      if (streaming) {
+        beginStream(response);
+        if (protocol === "responses") {
+          responsesStream = new ResponsesEventStream(
+            providerRequest.model,
+            `resp_chatworks_${randomUUID().replaceAll("-", "")}`,
+            (event) => writeResponsesEvent(response, event),
+          );
+          responsesStream.start();
+        }
+      }
       const completion = await complete(async () => {
         cancellation.signal.throwIfAborted();
         await logEvent("provider", "started", {
           correlationId,
           fields: { queueMs: Date.now() - startedAt },
         });
-        return completeProviderRequest(
-          body,
+        return completeDecodedProviderRequest(
+          providerRequest,
           gateway,
           correlationId,
           providerState,
           streaming
             ? (text) => {
-                if (!cancellation.signal.aborted)
-                  writeIntermediateChunk(response, body, text);
+                if (cancellation.signal.aborted) return;
+                if (protocol === "responses") responsesStream?.writeText(text);
+                else writeIntermediateChunk(response, body, text);
               }
             : undefined,
           toolAdapter,
@@ -123,7 +153,18 @@ export function createProviderServer(
         correlationId,
         fields: { durationMs: Date.now() - startedAt },
       });
-      if (streaming) {
+      if (protocol === "responses") {
+        if (streaming) {
+          responsesStream?.complete(completion);
+          response.end();
+        } else {
+          respondJson(
+            response,
+            200,
+            responseObject(completion, completionOutputItems(completion)),
+          );
+        }
+      } else if (streaming) {
         respondStream(response, completion, false, true);
       } else {
         respondJson(response, 200, completion);
@@ -146,13 +187,18 @@ export function createProviderServer(
         return;
       }
       if (response.headersSent) {
-        writeEvent(response, {
-          error: {
-            message,
-            type: "server_error",
-          },
-        });
-        response.end("data: [DONE]\n\n");
+        if (protocol === "responses") {
+          responsesStream?.error(message);
+          response.end();
+        } else {
+          writeEvent(response, {
+            error: {
+              message,
+              type: "server_error",
+            },
+          });
+          response.end("data: [DONE]\n\n");
+        }
       } else {
         respondJson(response, requestValidated ? 500 : 400, {
           error: {
@@ -308,4 +354,70 @@ function respondStream(
 
 function writeEvent(response: ServerResponse, value: unknown): void {
   response.write(`data: ${JSON.stringify(value)}\n\n`);
+}
+
+function writeResponsesEvent(
+  response: ServerResponse,
+  event: { type: string },
+): void {
+  response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+}
+
+function openAIModelCatalog(): unknown {
+  return {
+    object: "list",
+    data: [
+      {
+        id: "chatworks",
+        object: "model",
+        owned_by: "chatworks",
+      },
+    ],
+  };
+}
+
+function codexModelCatalog(): unknown {
+  return {
+    models: [
+      {
+        slug: "chatworks",
+        display_name: "ChatWorks",
+        description: "ChatGPT through the local ChatWorks provider.",
+        base_instructions: "",
+        default_reasoning_level: "medium",
+        supported_reasoning_levels: [
+          {
+            effort: "low",
+            description: "Ask ChatGPT to use lighter reasoning.",
+          },
+          {
+            effort: "medium",
+            description: "Use the default ChatGPT reasoning level.",
+          },
+          {
+            effort: "high",
+            description: "Ask ChatGPT to use deeper reasoning.",
+          },
+        ],
+        shell_type: "unified_exec",
+        visibility: "list",
+        supported_in_api: true,
+        priority: 1,
+        include_skills_usage_instructions: false,
+        include_plugin_usage_instructions: false,
+        include_apps_usage_instructions: false,
+        default_reasoning_summary: "none",
+        support_verbosity: false,
+        truncation_policy: { mode: "tokens", limit: 10_000 },
+        context_window: 128_000,
+        max_context_window: 128_000,
+        effective_context_window_percent: 95,
+        input_modalities: ["text"],
+        supports_search_tool: false,
+        supports_experimental_context: false,
+        experimental_supported_tools: [],
+        use_responses_lite: false,
+      },
+    ],
+  };
 }

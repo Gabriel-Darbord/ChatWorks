@@ -1,6 +1,6 @@
 # Local agent provider
 
-ChatWorks can expose one ChatGPT conversation as a local OpenAI-compatible chat-completions provider. An agent IDE or other client sends a model turn to ChatWorks; ChatWorks relays it through the selected ChatGPT UI, translates tool requests into native `tool_calls`, and returns tool results to the same chat until the turn is complete.
+ChatWorks can expose one ChatGPT conversation as a local OpenAI-compatible provider. An agent client sends a model turn to ChatWorks; ChatWorks relays it through the selected ChatGPT UI, translates tool requests into the client's native tool-call format, and returns tool results to the same chat until the turn is complete.
 
 This mode is client-neutral. OpenCode is one supported configuration example, not a requirement.
 
@@ -39,6 +39,9 @@ The provider exposes:
 
 - `GET /v1/models`
 - `POST /v1/chat/completions`
+- `POST /v1/responses`
+
+The Chat Completions route is useful for OpenAI-compatible clients such as OpenCode. The Responses route is used by the Codex CLI. Both routes share the same ChatWorks turn loop and can be served by the same process.
 
 Requests are serialized because one provider process controls one UI conversation. Run at most one provider process per running ChatGPT application; separate ports do not isolate two processes that control the same UI.
 
@@ -111,6 +114,52 @@ Add an OpenAI-compatible provider to the OpenCode configuration:
 ```
 
 The OpenCode model selector is `chatworks/chatworks`. The context and output values belong to the OpenCode configuration; ChatWorks does not enforce those limits.
+
+## Codex CLI
+
+Codex uses its Responses API transport for custom providers. ChatWorks includes a profile that keeps this setup separate from the regular OpenAI provider:
+
+```toml
+model = "chatworks"
+model_provider = "chatworks"
+model_context_window = 128000
+web_search = "disabled"
+
+[agents]
+enabled = false
+
+[features]
+apps = false
+memories = false
+multi_agent = false
+
+[mcp_servers.node_repl]
+enabled = false
+
+[mcp_servers.headroom]
+command = "headroom"
+args = ["mcp", "serve"]
+enabled = false
+
+[plugins."unified-computer-use@openai-bundled"]
+enabled = false
+
+[model_providers.chatworks]
+name = "ChatWorks"
+base_url = "http://127.0.0.1:32123/v1"
+wire_api = "responses"
+requires_openai_auth = false
+request_max_retries = 0
+stream_max_retries = 0
+```
+
+The repository setup creates this profile at `$CODEX_HOME/chatworks.config.toml` when `$CODEX_HOME` is configured, or at `~/.codex/chatworks.config.toml` otherwise. Start ChatWorks, then run Codex with:
+
+```sh
+codex --profile chatworks
+```
+
+The profile disables Codex-native web search, apps, memories, subagents, and the configured UI/MCP integrations because those tools are not represented by the local ChatWorks Responses adapter yet. The client tool loop remains available, including shell, file, image, and interactive-input tools exposed by Codex. If your main Codex configuration enables additional plugins or MCP servers, disable them in this profile as well.
 
 ## Operational limits
 

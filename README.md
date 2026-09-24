@@ -15,7 +15,7 @@ npm start -- switch 1
 npm start -- new
 ```
 
-ChatWorks can also expose the current ChatGPT conversation as a local OpenAI-compatible provider for an agent client or IDE:
+ChatWorks can also expose the current ChatGPT conversation as a local OpenAI-compatible provider for an agent client or IDE. It supports both Chat Completions clients and the Codex Responses transport:
 
 ```sh
 npm start -- --app classic provider

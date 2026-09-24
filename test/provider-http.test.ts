@@ -110,6 +110,96 @@ test("serves a non-streaming OpenAI-compatible completion", async () => {
   );
 });
 
+test("serves a non-streaming Responses completion", async () => {
+  await withServer(
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"All set."}}\n```',
+    async (url, prompts) => {
+      const response = await fetch(`${url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "chatworks-classic",
+          instructions: "Follow the repository rules.",
+          input: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "Inspect the project." }],
+            },
+          ],
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      const result = (await response.json()) as {
+        object: string;
+        output: Array<{ type: string; content?: Array<{ text: string }> }>;
+      };
+      assert.equal(result.object, "response");
+      assert.equal(result.output[0].type, "message");
+      assert.equal(result.output[0].content?.[0].text, "All set.");
+      assert.match(prompts[0], /Follow the repository rules\./);
+      assert.match(prompts[0], /Inspect the project\./);
+    },
+  );
+});
+
+test("streams Responses function calls", async () => {
+  await withServer(
+    'I will inspect it.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
+    async (url) => {
+      const response = await fetch(`${url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "chatworks-classic",
+          input: "Inspect src/app.ts.",
+          stream: true,
+          tools: [
+            {
+              type: "function",
+              name: "read",
+              parameters: { type: "object", required: ["path"] },
+            },
+          ],
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      assert.match(body, /event: response\.function_call_arguments\.done/);
+      assert.match(body, /"name":"read"/);
+      assert.match(body, /"arguments"/);
+      assert.match(body, /src\/app\.ts/);
+      assert.match(body, /event: response\.completed/);
+    },
+  );
+});
+
+test("serves Codex and OpenAI model catalogs", async () => {
+  await withServer("Unexpected.", async (url) => {
+    const codex = await fetch(`${url}/v1/models?client_version=0.155.0`);
+    assert.equal(codex.status, 200);
+    const codexCatalog = (await codex.json()) as {
+      models: Array<{ slug: string; truncation_policy: unknown }>;
+    };
+    assert.equal(codexCatalog.models[0].slug, "chatworks");
+    assert.deepEqual(codexCatalog.models[0].truncation_policy, {
+      mode: "tokens",
+      limit: 10_000,
+    });
+
+    const openAI = await fetch(`${url}/v1/models`);
+    assert.equal(openAI.status, 200);
+    const openAICatalog = (await openAI.json()) as {
+      object: string;
+      data: Array<{ id: string }>;
+    };
+    assert.equal(openAICatalog.object, "list");
+    assert.equal(openAICatalog.data[0].id, "chatworks");
+  });
+});
+
 test("streams tool calls in OpenAI-compatible SSE", async () => {
   await withServer(
     'I will inspect it.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',

@@ -7,6 +7,7 @@ import {
   formatCompactTools,
   formatSection,
   formatTools,
+  type ProviderRequest,
   type ProviderInternalToolNames,
 } from "./provider-request.ts";
 import {
@@ -110,8 +111,28 @@ export async function completeProviderRequest(
   toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
   signal?: AbortSignal,
 ): Promise<OpenAICompletion> {
-  signal?.throwIfAborted();
   const request = decodeProviderRequest(value);
+  return completeDecodedProviderRequest(
+    request,
+    gateway,
+    correlationId,
+    state,
+    onIntermediate,
+    toolAdapter,
+    signal,
+  );
+}
+
+export async function completeDecodedProviderRequest(
+  request: ProviderRequest,
+  gateway: ClassicProviderGateway,
+  correlationId?: string,
+  state: ProviderState = createProviderState(),
+  onIntermediate?: (text: string) => void,
+  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
+  signal?: AbortSignal,
+): Promise<OpenAICompletion> {
+  signal?.throwIfAborted();
   const internalTools = createInternalProviderTools(request.tools, toolAdapter);
   const turn = providerTurnId();
   prunePendingState(state);
