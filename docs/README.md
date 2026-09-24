@@ -1,9 +1,10 @@
 # ChatWorks documentation
 
-## User documentation
+## User guides
 
-- [User reference](reference.md#user-reference): installation requirements, CLI commands and options, message execution, discussions, recovery, and OpenCode provider setup.
+- [CLI and trigger loop](cli.md): run ChatWorks directly, execute supported code blocks, manage chats, and recover interrupted watch work.
+- [Local agent provider](provider.md): expose a ChatGPT conversation to an OpenAI-compatible agent client or IDE.
 
-## Developer documentation
+## Developer guide
 
-- [Developer reference](reference.md#developer-reference): development commands, Accessibility bridge, diagnostics, runtime state, watchdog, and implementation behavior.
+- [Development and internals](development.md): build commands, Accessibility behavior, diagnostics, runtime state, and the lower-level bridge CLI.

@@ -15,13 +15,15 @@ npm start -- switch 1
 npm start -- new
 ```
 
-ChatWorks can also expose a selected ChatGPT conversation as a local OpenAI-compatible provider for OpenCode:
+ChatWorks can also expose the current ChatGPT conversation as a local OpenAI-compatible provider for an agent client or IDE:
 
 ```sh
-npm start -- --app classic provider serve --chat "ChatWorks provider"
+npm start -- --app classic provider
 ```
 
-Use `npm start -- --help` for the command summary. See the [documentation index](docs/) for separate user and developer documentation, including the [OpenCode-compatible provider setup](docs/reference.md#opencode-compatible-provider).
+Use `--chat "Exact title"` to select another conversation at startup.
+
+See the [documentation index](docs/) for the [CLI and trigger loop](docs/cli.md), [local agent provider](docs/provider.md), and [development guide](docs/development.md).
 
 For development, run:
 
