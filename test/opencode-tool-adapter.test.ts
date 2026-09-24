@@ -21,6 +21,10 @@ test("presents OpenCode task input with provider-neutral mode naming", () => {
     },
   });
 
+  assert.match(
+    tool.description ?? "",
+    /Continue a complex, multistep task autonomously/,
+  );
   assert.deepEqual(tool.input?.required, ["mode"]);
   assert.deepEqual(tool.input?.schema?.required, ["mode"]);
   assert.equal(
@@ -29,6 +33,13 @@ test("presents OpenCode task input with provider-neutral mode naming", () => {
   );
   assert.ok(
     "mode" in (tool.input?.schema?.properties as Record<string, unknown>),
+  );
+  assert.deepEqual(
+    (tool.input?.schema?.properties as Record<string, unknown>).mode,
+    {
+      type: "string",
+      description: "The mode to use for this autonomous iteration",
+    },
   );
 });
 

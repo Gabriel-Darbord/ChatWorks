@@ -105,7 +105,6 @@ function renameInputField(
 
   return {
     ...tool,
-    description,
     input: {
       ...tool.input,
       ...(required ? { required } : {}),
