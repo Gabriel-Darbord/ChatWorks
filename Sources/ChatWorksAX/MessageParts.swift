@@ -16,6 +16,23 @@ public struct AccessibilityMessagePart: Encodable {
   }
 }
 
+func accessibilityMessageText(_ parts: [AccessibilityMessagePart]) -> String {
+  parts.compactMap { part in
+    if part.kind == "text" {
+      return part.text
+    }
+
+    guard part.kind == "code", let source = part.source else { return nil }
+    let longestFence =
+      source
+      .components(separatedBy: "\n")
+      .map { line in line.prefix(while: { $0 == "`" }).count }
+      .max() ?? 0
+    let fence = String(repeating: "`", count: max(3, longestFence + 1))
+    return "\(fence)\(part.language ?? "")\n\(source)\n\(fence)"
+  }.joined(separator: "\n\n")
+}
+
 struct AccessibilityMessagePartReader {
   func read(_ payload: AccessibilitySelectedPayload) -> [AccessibilityMessagePart] {
     // AccessibilityMessageStructure establishes the ordered block-level

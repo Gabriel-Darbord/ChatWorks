@@ -297,11 +297,7 @@ public struct ChatGPTAccessibility {
   }
 
   private func latestClassicAccessibilityRawText() throws -> String {
-    let parts = try latestClassicAccessibilityObservation().parts
-    return parts.compactMap { part in
-      guard part.kind == "code", let source = part.source else { return nil }
-      return "```\(part.language ?? "")\n\(source)\n```"
-    }.joined(separator: "\n\n")
+    accessibilityMessageText(try latestClassicAccessibilityObservation().parts)
   }
 
   public func scrollToBottom() throws {
