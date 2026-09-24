@@ -57,7 +57,7 @@ test("persists provider lifecycle transitions without request bodies", async () 
 
   try {
     await withServer(
-      '```tools\n{"name":"finish","input":{"conclusion":"All set."}}\n```',
+      '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"All set."}}\n```',
       async (url) => {
         const response = await fetch(`${url}/v1/chat/completions`, {
           method: "POST",
@@ -89,7 +89,7 @@ test("persists provider lifecycle transitions without request bodies", async () 
 
 test("serves a non-streaming OpenAI-compatible completion", async () => {
   await withServer(
-    '```tools\n{"name":"finish","input":{"conclusion":"All set."}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"All set."}}\n```',
     async (url, prompts) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
         method: "POST",
@@ -140,7 +140,7 @@ test("streams prose-only internal iterations before the final response", async (
   await withServer(
     [
       "Partial finding.",
-      '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
+      '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Done."}}\n```',
     ],
     async (url, prompts) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
@@ -170,7 +170,7 @@ test("streams prose-only internal iterations before the final response", async (
 
 test("accepts requests larger than the former 10 MB transport limit", async () => {
   await withServer(
-    '```tools\n{"name":"finish","input":{"conclusion":"All set."}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"All set."}}\n```',
     async (url, prompts) => {
       const response = await fetch(`${url}/v1/chat/completions`, {
         method: "POST",

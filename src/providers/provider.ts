@@ -7,6 +7,7 @@ import {
   formatCompactTools,
   formatSection,
   formatTools,
+  type ProviderInternalToolNames,
 } from "./provider-request.ts";
 import {
   identityProviderToolAdapter,
@@ -14,6 +15,7 @@ import {
 } from "./provider-tool-adapter.ts";
 import {
   parseProviderToolBlocks,
+  type ProviderTool,
   type ToolProtocolResult,
 } from "./provider-tools.ts";
 
@@ -29,27 +31,25 @@ const internalToolInput = {
   },
 };
 
-const listToolsTool = {
-  name: "listtools",
-  input: internalToolInput,
+const finishToolInput = {
+  required: ["conclusion"],
+  schema: {
+    type: "object",
+    properties: {
+      conclusion: {
+        type: "string",
+        description: "Final response returned to the user.",
+      },
+    },
+    required: ["conclusion"],
+    additionalProperties: false,
+  },
 };
 
-const finishTool = {
-  name: "finish",
-  input: {
-    required: ["conclusion"],
-    schema: {
-      type: "object",
-      properties: {
-        conclusion: {
-          type: "string",
-          description: "Final response returned to the user.",
-        },
-      },
-      required: ["conclusion"],
-      additionalProperties: false,
-    },
-  },
+type InternalProviderTools = {
+  names: ProviderInternalToolNames;
+  finish: ProviderTool;
+  listTools: ProviderTool;
 };
 
 export type ClassicProviderGateway = {
@@ -112,6 +112,7 @@ export async function completeProviderRequest(
 ): Promise<OpenAICompletion> {
   signal?.throwIfAborted();
   const request = decodeProviderRequest(value);
+  const internalTools = createInternalProviderTools(request.tools, toolAdapter);
   const turn = providerTurnId();
   prunePendingState(state);
   const pendingContexts = request.messages.flatMap((message) => {
@@ -132,6 +133,7 @@ export async function completeProviderRequest(
     undefined,
     [...new Set(pendingCatalogs), ...new Set(pendingInternalResults)],
     toolAdapter,
+    internalTools.names,
   );
   let prompt = compiled.prompt;
   let repairCount = 0;
@@ -156,7 +158,7 @@ export async function completeProviderRequest(
 
     const result = parseProviderToolBlocks(
       message,
-      [...compiled.tools, listToolsTool, finishTool],
+      [...compiled.tools, internalTools.listTools, internalTools.finish],
       turn,
       toolAdapter,
     );
@@ -168,15 +170,20 @@ export async function completeProviderRequest(
     if (result.kind === "text") {
       prompt = [
         "The coding-agent turn is still active. Continue working on the current task: reason through what remains, investigate or verify assumptions, and use the available tools whenever they can materially advance the work. Do not stop merely because you have an intermediate result or no immediate tool call to make.",
-        "When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling `finish` with a `conclusion` string. The conclusion becomes the final response to the user and should concisely summarize the work performed, important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.",
+        `When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling \`${internalTools.names.finish}\` with a \`conclusion\` string. The conclusion becomes the final response to the user and should concisely summarize the work performed, important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.`,
         "",
-        formatSection("Active tools", formatCompactTools(request.tools)),
+        formatSection(
+          "Active tools",
+          formatCompactTools(request.tools, internalTools.names.listTools),
+        ),
       ].join("\n");
       continue;
     }
 
     if (result.kind === "tool-calls") {
-      const finishCalls = result.calls.filter((call) => call.name === "finish");
+      const finishCalls = result.calls.filter(
+        (call) => call.name === internalTools.names.finish,
+      );
       if (finishCalls.length > 0) {
         if (result.calls.length === 1) {
           const conclusion = finishCalls[0].input.conclusion;
@@ -184,8 +191,7 @@ export async function completeProviderRequest(
             typeof conclusion !== "string" ||
             conclusion.trim().length === 0
           ) {
-            prompt =
-              "The `finish` conclusion must be a non-empty string. Continue the current task, then call `finish` with the final response in `input.conclusion`.";
+            prompt = `The \`${internalTools.names.finish}\` conclusion must be a non-empty string. Continue the current task, then call \`${internalTools.names.finish}\` with the final response in \`input.conclusion\`.`;
             continue;
           }
           return completion(request.model, turn, {
@@ -195,15 +201,14 @@ export async function completeProviderRequest(
         }
 
         const remainingCalls = result.calls.filter(
-          (call) => call.name !== "finish",
+          (call) => call.name !== internalTools.names.finish,
         );
-        const finishIgnored =
-          "The `finish` call was ignored because it was called alongside another tool. The other tools were executed and the coding-agent turn remains active.";
+        const finishIgnored = `The \`${internalTools.names.finish}\` call was ignored because it was called alongside another tool. The other tools were executed and the coding-agent turn remains active.`;
         const requestedCatalog = remainingCalls.some(
-          (call) => call.name === "listtools",
+          (call) => call.name === internalTools.names.listTools,
         );
         const realCalls = remainingCalls.filter(
-          (call) => call.name !== "listtools",
+          (call) => call.name !== internalTools.names.listTools,
         );
         const catalog = requestedCatalog
           ? `Full tool catalog requested:\n\n${formatTools(compiled.tools, toolAdapter)}`
@@ -227,13 +232,13 @@ export async function completeProviderRequest(
       }
 
       const requestedCatalog = result.calls.some(
-        (call) => call.name === "listtools",
+        (call) => call.name === internalTools.names.listTools,
       );
 
       if (requestedCatalog) {
         const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools, toolAdapter)}`;
         const realCalls = result.calls.filter(
-          (call) => call.name !== "listtools",
+          (call) => call.name !== internalTools.names.listTools,
         );
 
         if (realCalls.length === 0) {
@@ -280,6 +285,34 @@ function rememberPendingContext(
     ...context,
   });
   prunePendingState(state);
+}
+
+function createInternalProviderTools(
+  tools: ProviderTool[],
+  toolAdapter: ProviderToolAdapter,
+): InternalProviderTools {
+  const unavailableNames = new Set(
+    tools.flatMap((tool) => [tool.name, toolAdapter.present(tool).name]),
+  );
+  let namespace = "chatworks_internal";
+  let suffix = 2;
+  while (
+    unavailableNames.has(`${namespace}_finish`) ||
+    unavailableNames.has(`${namespace}_listtools`)
+  ) {
+    namespace = `chatworks_internal_${suffix}`;
+    suffix += 1;
+  }
+
+  const names = {
+    finish: `${namespace}_finish`,
+    listTools: `${namespace}_listtools`,
+  };
+  return {
+    names,
+    finish: { name: names.finish, input: finishToolInput },
+    listTools: { name: names.listTools, input: internalToolInput },
+  };
 }
 
 function prunePendingState(state: ProviderState): void {

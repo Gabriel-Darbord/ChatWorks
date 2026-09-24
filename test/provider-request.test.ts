@@ -73,7 +73,10 @@ test("uses only compact tool discovery after the initial turn", () => {
 
   const prompt = compileClassicTurn(request).prompt;
   assert.match(prompt, /Available tool names: read/);
-  assert.match(prompt, /call listtools with an empty input object/);
+  assert.match(
+    prompt,
+    /call chatworks_internal_listtools with an empty input object/,
+  );
   assert.doesNotMatch(prompt, /deliberately verbose/);
   assert.doesNotMatch(prompt, /input schema:/);
 });

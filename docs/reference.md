@@ -147,6 +147,8 @@ An assistant requests OpenCode operations using one or more ordered `tools` fenc
 
 ChatWorks validates every `tools` block in the response as one complete batch before returning tool calls. A malformed batch does not execute a valid prefix. Independent calls should share as few blocks as practical; dependent calls should be sequenced across turns.
 
+ChatWorks adds namespaced control tools for catalog discovery and turn completion. Their exact names are included in the prompt. The default namespace is `chatworks_internal`; when a client tool already uses either generated name, ChatWorks selects the next free numbered namespace for both control tools.
+
 ### Environment variables
 
 - `CHATWORKS_AX_BRIDGE`: override the path to the `chatworks-ax` executable.

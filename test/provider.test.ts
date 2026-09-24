@@ -78,9 +78,57 @@ test("uses distinct tool-call ids for identical provider requests", async () => 
   assert.notEqual(first.id, second.id);
 });
 
+test("dynamically namespaces internal tools away from client tools", async () => {
+  const collidingRequest = {
+    model: "chatworks",
+    messages: [
+      { role: "user", content: "Begin the task." },
+      { role: "assistant", content: "I started it." },
+      { role: "user", content: "Use the appropriate finish tool." },
+    ],
+    tools: [
+      "finish",
+      "listtools",
+      "chatworks_internal_finish",
+      "chatworks_internal_listtools",
+    ].map((name) => ({
+      type: "function",
+      function: { name },
+    })),
+  };
+  const externalFixture = gateway(
+    '```tools\n{"name":"finish","input":{}}\n{"name":"listtools","input":{}}\n```',
+  );
+
+  const external = await completeProviderRequest(
+    collidingRequest,
+    externalFixture.gateway,
+  );
+
+  assert.deepEqual(
+    external.choices[0].message.tool_calls?.map((call) => call.function.name),
+    ["finish", "listtools"],
+  );
+  assert.match(externalFixture.prompts[0], /`chatworks_internal_2_finish`/);
+  assert.match(
+    externalFixture.prompts[0],
+    /call chatworks_internal_2_listtools/,
+  );
+
+  const internalFixture = gateway(
+    '```tools\n{"name":"chatworks_internal_2_finish","input":{"conclusion":"Done."}}\n```',
+  );
+  const internal = await completeProviderRequest(
+    collidingRequest,
+    internalFixture.gateway,
+  );
+  assert.equal(internal.choices[0].message.content, "Done.");
+  assert.equal(internal.choices[0].finish_reason, "stop");
+});
+
 test("returns a Classic-generated client title", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"finish","input":{"conclusion":"Available tools overview"}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Available tools overview"}}\n```',
   );
   const result = await completeProviderRequest(
     {
@@ -109,7 +157,7 @@ test("returns a Classic-generated client title", async () => {
 
 test("serves the full tool catalog through listtools", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"listtools","input":{}}\n```',
+    '```tools\n{"name":"chatworks_internal_listtools","input":{}}\n```',
     '```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n```',
   );
 
@@ -127,7 +175,7 @@ test("serves the full tool catalog through listtools", async () => {
 
   assert.equal(fixture.prompts.length, 2);
   assert.doesNotMatch(fixture.prompts[0], /input schema:/);
-  assert.match(fixture.prompts[0], /call listtools/);
+  assert.match(fixture.prompts[0], /call chatworks_internal_listtools/);
   assert.match(fixture.prompts[1], /Full tool catalog requested/);
   assert.match(fixture.prompts[1], /name: read/);
   assert.match(fixture.prompts[1], /input schema/);
@@ -136,8 +184,8 @@ test("serves the full tool catalog through listtools", async () => {
 
 test("composes listtools with surrounding real tool calls", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n{"name":"listtools","input":{}}\n{"name":"read","input":{"path":"src/b.ts"}}\n```',
-    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
+    '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n{"name":"chatworks_internal_listtools","input":{}}\n{"name":"read","input":{"path":"src/b.ts"}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Done."}}\n```',
   );
   const state = createProviderState();
   const continuedRequest = {
@@ -203,8 +251,8 @@ test("bounds and expires abandoned pending provider state", async () => {
     });
   }
   const fixture = gateway(
-    '```tools\n{"name":"finish","input":{"conclusion":"First."}}\n```',
-    '```tools\n{"name":"finish","input":{"conclusion":"Second."}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"First."}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Second."}}\n```',
   );
 
   await completeProviderRequest(request, fixture.gateway, undefined, state);
@@ -236,7 +284,7 @@ test("bounds and expires abandoned pending provider state", async () => {
 
 test("finishes internally with prose as the final response", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"finish","input":{"conclusion":"Implementation complete."}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Implementation complete."}}\n```',
   );
 
   const result = await completeProviderRequest(request, fixture.gateway);
@@ -248,8 +296,8 @@ test("finishes internally with prose as the final response", async () => {
 
 test("rejects finish without a conclusion", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"finish","input":{}}\n```',
-    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Done."}}\n```',
   );
 
   const result = await completeProviderRequest(request, fixture.gateway);
@@ -263,7 +311,7 @@ test("rejects finish without a conclusion", async () => {
 test("emits all Classic prose while continuing internally until finish", async () => {
   const fixture = gateway(
     "Partial finding.",
-    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Done."}}\n```',
   );
 
   const intermediate: string[] = [];
@@ -296,8 +344,8 @@ test("bounds internal turns when Classic never finishes", async () => {
 
 test("ignores finish alongside another tool and executes the other tool", async () => {
   const fixture = gateway(
-    'Still checking.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n{"name":"finish","input":{"conclusion":"Premature conclusion"}}\n```',
-    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
+    'Still checking.\n\n```tools\n{"name":"read","input":{"path":"src/app.ts"}}\n{"name":"chatworks_internal_finish","input":{"conclusion":"Premature conclusion"}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Done."}}\n```',
   );
   const state = createProviderState();
 
@@ -341,8 +389,8 @@ test("ignores finish alongside another tool and executes the other tool", async 
 
 test("ignores finish alongside listtools and serves the catalog", async () => {
   const fixture = gateway(
-    '```tools\n{"name":"listtools","input":{}}\n{"name":"finish","input":{"conclusion":"Premature conclusion"}}\n```',
-    '```tools\n{"name":"finish","input":{"conclusion":"Done."}}\n```',
+    '```tools\n{"name":"chatworks_internal_listtools","input":{}}\n{"name":"chatworks_internal_finish","input":{"conclusion":"Premature conclusion"}}\n```',
+    '```tools\n{"name":"chatworks_internal_finish","input":{"conclusion":"Done."}}\n```',
   );
 
   const result = await completeProviderRequest(request, fixture.gateway);
