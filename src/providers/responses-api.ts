@@ -7,12 +7,12 @@ import type { ProviderTool } from "./provider-tools.ts";
 
 type UnknownRecord = Record<string, unknown>;
 
-export type DecodedResponsesRequest = {
+type DecodedResponsesRequest = {
   request: ProviderRequest;
   stream: boolean;
 };
 
-export type ResponsesOutputItem =
+type ResponsesOutputItem =
   | {
       id: string;
       type: "message";
@@ -33,7 +33,7 @@ export type ResponsesOutputItem =
       arguments: string;
     };
 
-export type OpenAIResponse = {
+type OpenAIResponse = {
   id: string;
   object: "response";
   created_at: number;
@@ -93,52 +93,7 @@ export class ResponsesEventStream {
   writeText(text: string): void {
     const index = this.#output.length;
     const item = textOutputItem(this.#id, index, text);
-    const pendingItem = {
-      ...item,
-      status: "in_progress" as const,
-      content: [],
-    };
-    const part = item.content[0];
-    const emptyPart = { ...part, text: "" };
-
-    this.#write({
-      type: "response.output_item.added",
-      output_index: index,
-      item: pendingItem,
-    });
-    this.#write({
-      type: "response.content_part.added",
-      item_id: item.id,
-      output_index: index,
-      content_index: 0,
-      part: emptyPart,
-    });
-    this.#write({
-      type: "response.output_text.delta",
-      item_id: item.id,
-      output_index: index,
-      content_index: 0,
-      delta: text,
-    });
-    this.#write({
-      type: "response.output_text.done",
-      item_id: item.id,
-      output_index: index,
-      content_index: 0,
-      text,
-    });
-    this.#write({
-      type: "response.content_part.done",
-      item_id: item.id,
-      output_index: index,
-      content_index: 0,
-      part,
-    });
-    this.#write({
-      type: "response.output_item.done",
-      output_index: index,
-      item,
-    });
+    this.#writeTextItem(item, index);
     this.#output.push(item);
   }
 
@@ -148,7 +103,8 @@ export class ResponsesEventStream {
       : "chatcmpl_" + this.#id;
     const normalized = { ...completion, id: completionId };
     for (const item of completionOutputItems(normalized, this.#output.length)) {
-      if (item.type === "message") this.#writeTextItem(item);
+      if (item.type === "message")
+        this.#writeTextItem(item, this.#output.length);
       else this.#writeFunctionItem(item);
       this.#output.push(item);
     }
@@ -169,8 +125,8 @@ export class ResponsesEventStream {
 
   #writeTextItem(
     item: Extract<ResponsesOutputItem, { type: "message" }>,
+    index: number,
   ): void {
-    const index = this.#output.length;
     const text = item.content[0].text;
     const pendingItem = {
       ...item,
@@ -483,7 +439,7 @@ export function completionOutputItems(
   return items;
 }
 
-export function textOutputItem(
+function textOutputItem(
   idSeed: string,
   index: number,
   text: string,
@@ -500,13 +456,12 @@ export function textOutputItem(
 export function responseObject(
   completion: OpenAICompletion,
   output: ResponsesOutputItem[],
-  status: "in_progress" | "completed" = "completed",
 ): OpenAIResponse {
   return {
     id: responseId(completion.id),
     object: "response",
     created_at: completion.created,
-    status,
+    status: "completed",
     error: null,
     incomplete_details: null,
     model: completion.model,

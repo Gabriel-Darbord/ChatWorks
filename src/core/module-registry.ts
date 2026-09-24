@@ -2,7 +2,6 @@ import type { MessageModule } from "./modules.ts";
 
 export type ModuleDescriptor = {
   id: string;
-  incompatibleWith?: readonly string[];
   messageModule?: MessageModule;
 };
 
@@ -31,15 +30,6 @@ export function activateModules(
         `Unknown module '${id}'. Available modules: ${descriptors.map((candidate) => candidate.id).join(", ")}.`,
       );
     active.push(descriptor);
-  }
-  for (const descriptor of active) {
-    const conflict = descriptor.incompatibleWith?.find((id) =>
-      active.some((candidate) => candidate.id === id),
-    );
-    if (conflict)
-      throw new Error(
-        `Modules '${descriptor.id}' and '${conflict}' cannot be active together.`,
-      );
   }
   return active;
 }

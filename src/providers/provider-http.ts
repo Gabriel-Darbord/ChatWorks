@@ -11,10 +11,6 @@ import {
   type ClassicProviderGateway,
   type OpenAICompletion,
 } from "./provider.ts";
-import {
-  identityProviderToolAdapter,
-  type ProviderToolAdapter,
-} from "./provider-tool-adapter.ts";
 import { decodeProviderRequest } from "./provider-request.ts";
 import {
   completionOutputItems,
@@ -26,10 +22,7 @@ import { logDebug, logError, logEvent } from "../core/diagnostics.ts";
 
 const maxRequestBytes = 100_000_000;
 
-export function createProviderServer(
-  gateway: ClassicProviderGateway,
-  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
-): Server {
+export function createProviderServer(gateway: ClassicProviderGateway): Server {
   let pending = Promise.resolve();
   let requestCount = 0;
   const providerState = createProviderState();
@@ -141,7 +134,6 @@ export function createProviderServer(
                 else writeIntermediateChunk(response, body, text);
               }
             : undefined,
-          toolAdapter,
           cancellation.signal,
         );
       });
@@ -165,7 +157,7 @@ export function createProviderServer(
           );
         }
       } else if (streaming) {
-        respondStream(response, completion, false, true);
+        respondStream(response, completion);
       } else {
         respondJson(response, 200, completion);
       }
@@ -292,14 +284,10 @@ function writeIntermediateChunk(
 function respondStream(
   response: ServerResponse,
   completion: OpenAICompletion,
-  writeHeaders = true,
-  writeContent = true,
 ): void {
-  if (writeHeaders) beginStream(response);
-
   const choice = completion.choices[0];
   if (choice.finish_reason === "tool_calls") {
-    if (writeContent && choice.message.content) {
+    if (choice.message.content) {
       writeEvent(response, {
         id: completion.id,
         object: "chat.completion.chunk",
@@ -327,7 +315,7 @@ function respondStream(
         },
       ],
     });
-  } else if (writeContent && choice.message.content) {
+  } else if (choice.message.content) {
     writeEvent(response, {
       id: completion.id,
       object: "chat.completion.chunk",

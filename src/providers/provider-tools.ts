@@ -1,8 +1,4 @@
 import { messageText, type Message } from "../core/message.ts";
-import {
-  identityProviderToolAdapter,
-  type ProviderToolAdapter,
-} from "./provider-tool-adapter.ts";
 
 export type ProviderTool = {
   name: string;
@@ -43,7 +39,6 @@ export function parseProviderToolBlocks(
   message: Message,
   tools: ProviderTool[],
   providerTurn: string,
-  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
 ): ToolProtocolResult {
   const parts = [...message.parts];
 
@@ -72,8 +67,7 @@ export function parseProviderToolBlocks(
       ),
   }).trim();
 
-  const presentedTools = tools.map(toolAdapter.present);
-  const available = new Map(presentedTools.map((tool) => [tool.name, tool]));
+  const available = new Map(tools.map((tool) => [tool.name, tool]));
   const calls: ProviderToolCall[] = [];
 
   for (const toolPartIndex of toolPartIndexes) {
@@ -94,12 +88,11 @@ export function parseProviderToolBlocks(
 
     for (const line of callLines) {
       const callIndex = calls.length + 1;
-      const parsed = parseEnvelope(line, callIndex, presentedTools);
+      const parsed = parseEnvelope(line, callIndex, tools);
       if (parsed.kind === "repair") return parsed;
 
       const tool = available.get(parsed.name);
-      if (!tool)
-        return repairUnknownTool(callIndex, parsed.name, presentedTools);
+      if (!tool) return repairUnknownTool(callIndex, parsed.name, tools);
 
       const missing = (tool.input?.required ?? []).filter(
         (field) => !(field in parsed.input),
@@ -110,7 +103,7 @@ export function parseProviderToolBlocks(
       calls.push({
         id: `chatworks_${providerTurn}_${callIndex}`,
         name: parsed.name,
-        input: toolAdapter.restoreInput(parsed.name, parsed.input),
+        input: parsed.input,
       });
     }
   }

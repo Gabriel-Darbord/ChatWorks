@@ -1,5 +1,3 @@
-import type { ProviderToolAdapter } from "./provider-tool-adapter.ts";
-import { identityProviderToolAdapter } from "./provider-tool-adapter.ts";
 import type { ProviderTool } from "./provider-tools.ts";
 
 export type ProviderChatMessage = {
@@ -63,7 +61,6 @@ export function compileClassicTurn(
   request: ProviderRequest,
   includeToolCatalog = isInitialTurn(request.messages),
   internalToolResults: string[] = [],
-  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
   internalToolNames: ProviderInternalToolNames = defaultProviderInternalToolNames,
 ): CompiledClassicTurn {
   const { toolResults, update } = newestConversationUpdate(request.messages);
@@ -89,7 +86,7 @@ export function compileClassicTurn(
       "- Only call client tools listed under Active tools and the ChatWorks control tools named in these instructions.",
     ].join("\n"),
     includeToolCatalog
-      ? formatSection("Active tools", formatTools(request.tools, toolAdapter))
+      ? formatSection("Active tools", formatTools(request.tools))
       : formatSection(
           "Active tools",
           formatCompactTools(request.tools, internalToolNames.listTools),
@@ -258,14 +255,10 @@ function newestConversationUpdate(messages: ProviderChatMessage[]): {
   };
 }
 
-export function formatTools(
-  tools: ProviderTool[],
-  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
-): string {
+export function formatTools(tools: ProviderTool[]): string {
   if (tools.length === 0) return "No tools are available for this turn.";
 
   return tools
-    .map(toolAdapter.present)
     .map((tool) => {
       const sections = [`name: ${tool.name}`];
       if (tool.description) sections.push(`description:\n${tool.description}`);

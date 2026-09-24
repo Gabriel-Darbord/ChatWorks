@@ -11,10 +11,6 @@ import {
   type ProviderInternalToolNames,
 } from "./provider-request.ts";
 import {
-  identityProviderToolAdapter,
-  type ProviderToolAdapter,
-} from "./provider-tool-adapter.ts";
-import {
   parseProviderToolBlocks,
   type ProviderTool,
   type ToolProtocolResult,
@@ -108,7 +104,6 @@ export async function completeProviderRequest(
   correlationId?: string,
   state: ProviderState = createProviderState(),
   onIntermediate?: (text: string) => void,
-  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
   signal?: AbortSignal,
 ): Promise<OpenAICompletion> {
   const request = decodeProviderRequest(value);
@@ -118,7 +113,6 @@ export async function completeProviderRequest(
     correlationId,
     state,
     onIntermediate,
-    toolAdapter,
     signal,
   );
 }
@@ -129,11 +123,10 @@ export async function completeDecodedProviderRequest(
   correlationId?: string,
   state: ProviderState = createProviderState(),
   onIntermediate?: (text: string) => void,
-  toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
   signal?: AbortSignal,
 ): Promise<OpenAICompletion> {
   signal?.throwIfAborted();
-  const internalTools = createInternalProviderTools(request.tools, toolAdapter);
+  const internalTools = createInternalProviderTools(request.tools);
   const turn = providerTurnId();
   prunePendingState(state);
   const pendingContexts = request.messages.flatMap((message) => {
@@ -153,7 +146,6 @@ export async function completeDecodedProviderRequest(
     request,
     undefined,
     [...new Set(pendingCatalogs), ...new Set(pendingInternalResults)],
-    toolAdapter,
     internalTools.names,
   );
   let prompt = compiled.prompt;
@@ -181,7 +173,6 @@ export async function completeDecodedProviderRequest(
       message,
       [...compiled.tools, internalTools.listTools, internalTools.finish],
       turn,
-      toolAdapter,
     );
 
     if (result.kind === "text" && result.text) {
@@ -232,7 +223,7 @@ export async function completeDecodedProviderRequest(
           (call) => call.name !== internalTools.names.listTools,
         );
         const catalog = requestedCatalog
-          ? `Full tool catalog requested:\n\n${formatTools(compiled.tools, toolAdapter)}`
+          ? `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`
           : undefined;
 
         if (realCalls.length === 0) {
@@ -257,7 +248,7 @@ export async function completeDecodedProviderRequest(
       );
 
       if (requestedCatalog) {
-        const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools, toolAdapter)}`;
+        const catalog = `Full tool catalog requested:\n\n${formatTools(compiled.tools)}`;
         const realCalls = result.calls.filter(
           (call) => call.name !== internalTools.names.listTools,
         );
@@ -310,11 +301,8 @@ function rememberPendingContext(
 
 function createInternalProviderTools(
   tools: ProviderTool[],
-  toolAdapter: ProviderToolAdapter,
 ): InternalProviderTools {
-  const unavailableNames = new Set(
-    tools.flatMap((tool) => [tool.name, toolAdapter.present(tool).name]),
-  );
+  const unavailableNames = new Set(tools.map((tool) => tool.name));
   let namespace = "chatworks_internal";
   let suffix = 2;
   while (

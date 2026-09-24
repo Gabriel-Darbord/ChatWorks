@@ -23,14 +23,3 @@ test("activates only requested modules and exposes their message handlers", () =
   );
   assert.deepEqual(messageModules(active), [handler]);
 });
-
-test("rejects incompatible active modules", () => {
-  assert.throws(
-    () =>
-      activateModules(
-        [{ id: "a", incompatibleWith: ["b"] }, { id: "b" }],
-        ["a", "b"],
-      ),
-    /cannot be active together/,
-  );
-});
