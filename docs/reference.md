@@ -136,15 +136,16 @@ The model id is `chatworks/chatworks`. The context and output values above confi
 
 #### Provider tool protocol
 
-An assistant requests OpenCode operations using ordered `tool` fences, each containing exactly one JSON object with `name` and `input` fields:
+An assistant requests OpenCode operations using one or more ordered `tools` fences. Each non-empty line contains one JSON object with `name` and `input` fields:
 
 ````text
-```tool
+```tools
 {"name":"read","input":{"filePath":"src/app.ts"}}
+{"name":"grep","input":{"pattern":"TODO"}}
 ```
 ````
 
-ChatWorks validates the complete batch before returning tool calls. A malformed batch does not execute a valid prefix. Independent calls may be batched; dependent calls should be sequenced.
+ChatWorks validates every `tools` block in the response as one complete batch before returning tool calls. A malformed batch does not execute a valid prefix. Independent calls should share as few blocks as practical; dependent calls should be sequenced across turns.
 
 ### Environment variables
 

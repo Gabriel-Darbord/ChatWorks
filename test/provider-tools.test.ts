@@ -58,17 +58,31 @@ test("recognizes a tools block even when AX reports prose after it", () => {
   });
 });
 
-test("rejects multiple tools blocks", () => {
+test("accepts multiple tools blocks in encounter order", () => {
   const result = parseProviderToolBlocks(
     parseMessage(
-      '```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```\n```tools\n{"name":"grep","input":{"pattern":"TODO"}}\n```',
+      'First call.\n\n```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```\n\nThen search.\n\n```tools\n{"name":"grep","input":{"pattern":"TODO"}}\n```',
     ),
     tools,
     "turn_7c",
   );
 
-  assert.equal(result.kind, "repair");
-  assert.match(result.message, /more than one tools block/);
+  assert.deepEqual(result, {
+    kind: "tool-calls",
+    text: "First call.\n\nThen search.",
+    calls: [
+      {
+        id: "chatworks_turn_7c_1",
+        name: "read",
+        input: { path: "src/a.ts" },
+      },
+      {
+        id: "chatworks_turn_7c_2",
+        name: "grep",
+        input: { pattern: "TODO" },
+      },
+    ],
+  });
 });
 
 test("returns ordinary assistant text without a tool delimiter", () => {
@@ -82,7 +96,7 @@ test("returns ordinary assistant text without a tool delimiter", () => {
   );
 });
 
-test("repairs a non-tool block alongside tool calls", () => {
+test("preserves ordinary fenced blocks alongside tool calls", () => {
   const result = parseProviderToolBlocks(
     parseMessage(
       'I found the issue.\n\n```ts\nconst answer = 42;\n```\n\n```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```',
@@ -91,12 +105,20 @@ test("repairs a non-tool block alongside tool calls", () => {
     "turn_8b",
   );
 
-  assert.equal(result.kind, "repair");
-  assert.match(result.message, /`ts` block in addition to the tools block/);
-  assert.match(result.message, /tools block must be the only fenced block/);
+  assert.deepEqual(result, {
+    kind: "tool-calls",
+    text: "I found the issue.\n\n```ts\nconst answer = 42;\n```",
+    calls: [
+      {
+        id: "chatworks_turn_8b_1",
+        name: "read",
+        input: { path: "src/a.ts" },
+      },
+    ],
+  });
 });
 
-test("allows prose alongside the single tools block", () => {
+test("allows prose alongside a tools block", () => {
   const result = parseProviderToolBlocks(
     parseMessage(
       'I found the issue.\n\n```tools\n{"name":"read","input":{"path":"src/a.ts"}}\n```\n\nI will inspect the file.',

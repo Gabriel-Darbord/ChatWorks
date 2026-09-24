@@ -61,71 +61,58 @@ export function parseProviderToolBlocks(
   if (toolPartIndexes.length === 0) {
     return { kind: "text", text: messageText(message).trim() };
   }
-  if (toolPartIndexes.length > 1) {
-    return repair(
-      1,
-      "the response contains more than one tools block",
-      exampleFor(tools[0]),
-    );
-  }
 
-  const otherBlock = parts.find(
-    (part): part is Extract<typeof part, { kind: "block" }> =>
-      part.kind === "block" && part.language !== "tools",
-  );
-  if (otherBlock) {
-    return repair(
-      1,
-      `the response contains a \`${otherBlock.language || "text"}\` block in addition to the tools block; when invoking tools, the tools block must be the only fenced block`,
-      exampleFor(tools[0]),
-    );
-  }
-
-  const toolPartIndex = toolPartIndexes[0];
-  const toolsPart = parts[toolPartIndex];
-  if (toolsPart.kind !== "block") throw new Error("Unreachable tools part.");
+  const toolPartIndexSet = new Set(toolPartIndexes);
 
   const text = messageText({
     parts: parts
-      .filter((_, index) => index !== toolPartIndex)
+      .filter((_, index) => !toolPartIndexSet.has(index))
       .map((part) =>
         part.kind === "plain-text" ? { ...part, text: part.text.trim() } : part,
       ),
   }).trim();
-  const callLines = toolsPart.source
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (callLines.length === 0)
-    return repair(
-      1,
-      "the tools block contains no tool calls",
-      exampleFor(tools[0]),
-    );
 
   const presentedTools = tools.map(toolAdapter.present);
   const available = new Map(presentedTools.map((tool) => [tool.name, tool]));
   const calls: ProviderToolCall[] = [];
 
-  for (const [index, line] of callLines.entries()) {
-    const parsed = parseEnvelope(line, index + 1, presentedTools);
-    if (parsed.kind === "repair") return parsed;
+  for (const toolPartIndex of toolPartIndexes) {
+    const toolsPart = parts[toolPartIndex];
+    if (toolsPart.kind !== "block") throw new Error("Unreachable tools part.");
 
-    const tool = available.get(parsed.name);
-    if (!tool) return repairUnknownTool(index + 1, parsed.name, presentedTools);
+    const callLines = toolsPart.source
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (callLines.length === 0) {
+      return repair(
+        calls.length + 1,
+        "the tools block contains no tool calls",
+        exampleFor(tools[0]),
+      );
+    }
 
-    const missing = (tool.input?.required ?? []).filter(
-      (field) => !(field in parsed.input),
-    );
-    if (missing.length > 0)
-      return repairMissingInput(index + 1, tool, missing[0]);
+    for (const line of callLines) {
+      const callIndex = calls.length + 1;
+      const parsed = parseEnvelope(line, callIndex, presentedTools);
+      if (parsed.kind === "repair") return parsed;
 
-    calls.push({
-      id: `chatworks_${providerTurn}_${index + 1}`,
-      name: parsed.name,
-      input: toolAdapter.restoreInput(parsed.name, parsed.input),
-    });
+      const tool = available.get(parsed.name);
+      if (!tool)
+        return repairUnknownTool(callIndex, parsed.name, presentedTools);
+
+      const missing = (tool.input?.required ?? []).filter(
+        (field) => !(field in parsed.input),
+      );
+      if (missing.length > 0)
+        return repairMissingInput(callIndex, tool, missing[0]);
+
+      calls.push({
+        id: `chatworks_${providerTurn}_${callIndex}`,
+        name: parsed.name,
+        input: toolAdapter.restoreInput(parsed.name, parsed.input),
+      });
+    }
   }
 
   return { kind: "tool-calls", text, calls };
