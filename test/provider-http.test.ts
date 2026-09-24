@@ -202,6 +202,23 @@ test("reports malformed requests without contacting Classic", async () => {
   });
 });
 
+test("reports non-streaming provider failures as server errors", async () => {
+  await withServer([], async (url) => {
+    const response = await fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+
+    assert.equal(response.status, 500);
+    const body = (await response.json()) as {
+      error: { message: string; type: string };
+    };
+    assert.equal(body.error.type, "server_error");
+    assert.match(body.error.message, /Unexpected provider read/);
+  });
+});
+
 test("rejects malformed streaming requests before opening the stream", async () => {
   await withServer("Unexpected.", async (url, prompts) => {
     const response = await fetch(`${url}/v1/chat/completions`, {

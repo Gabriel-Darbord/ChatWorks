@@ -38,6 +38,7 @@ export function createProviderServer(
   return createServer(async (request, response) => {
     const requestId = ++requestCount;
     const startedAt = Date.now();
+    let requestValidated = false;
     const cancellation = new AbortController();
     const cancel = () => {
       if (cancellation.signal.aborted) return;
@@ -78,6 +79,9 @@ export function createProviderServer(
 
       const correlationId = `provider-${requestId}`;
       const body = await readJson(request);
+      const streaming = streamRequested(body);
+      decodeProviderRequest(body);
+      requestValidated = true;
       await logEvent("provider", "received", {
         correlationId,
         fields: {
@@ -89,8 +93,6 @@ export function createProviderServer(
         fields: { body: JSON.stringify(body) },
       });
       await logEvent("provider", "queued", { correlationId });
-      const streaming = streamRequested(body);
-      decodeProviderRequest(body);
       if (streaming) beginStream(response);
       const completion = await complete(async () => {
         cancellation.signal.throwIfAborted();
@@ -152,10 +154,10 @@ export function createProviderServer(
         });
         response.end("data: [DONE]\n\n");
       } else {
-        respondJson(response, 400, {
+        respondJson(response, requestValidated ? 500 : 400, {
           error: {
             message,
-            type: "invalid_request_error",
+            type: requestValidated ? "server_error" : "invalid_request_error",
           },
         });
       }
