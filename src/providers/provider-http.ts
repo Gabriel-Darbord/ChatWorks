@@ -38,6 +38,19 @@ export function createProviderServer(
   return createServer(async (request, response) => {
     const requestId = ++requestCount;
     const startedAt = Date.now();
+    const cancellation = new AbortController();
+    const cancel = () => {
+      if (cancellation.signal.aborted) return;
+      const error = new Error("Provider request was cancelled by its client.");
+      error.name = "AbortError";
+      cancellation.abort(error);
+    };
+    const cancelOnResponseClose = () => {
+      if (!response.writableEnded) cancel();
+    };
+    request.once("aborted", cancel);
+    response.once("close", cancelOnResponseClose);
+
     try {
       if (request.method === "GET" && request.url === "/v1/models") {
         respondJson(response, 200, {
@@ -80,6 +93,7 @@ export function createProviderServer(
       decodeProviderRequest(body);
       if (streaming) beginStream(response);
       const completion = await complete(async () => {
+        cancellation.signal.throwIfAborted();
         await logEvent("provider", "started", {
           correlationId,
           fields: { queueMs: Date.now() - startedAt },
@@ -90,9 +104,13 @@ export function createProviderServer(
           correlationId,
           providerState,
           streaming
-            ? (text) => writeIntermediateChunk(response, body, text)
+            ? (text) => {
+                if (!cancellation.signal.aborted)
+                  writeIntermediateChunk(response, body, text);
+              }
             : undefined,
           toolAdapter,
+          cancellation.signal,
         );
       });
       await logDebug("provider", "client-output", {
@@ -110,7 +128,8 @@ export function createProviderServer(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await logEvent("provider", "failed", {
+      const cancelled = cancellation.signal.aborted;
+      await logEvent("provider", cancelled ? "cancelled" : "failed", {
         correlationId: `provider-${requestId}`,
         fields: {
           durationMs: Date.now() - startedAt,
@@ -118,7 +137,12 @@ export function createProviderServer(
           errorMessage: message,
         },
       });
-      await logError("provider-request", error);
+      if (!cancelled) await logError("provider-request", error);
+      if (response.destroyed || response.writableEnded) return;
+      if (cancelled) {
+        response.destroy();
+        return;
+      }
       if (response.headersSent) {
         writeEvent(response, {
           error: {
@@ -135,6 +159,9 @@ export function createProviderServer(
           },
         });
       }
+    } finally {
+      request.off("aborted", cancel);
+      response.off("close", cancelOnResponseClose);
     }
   });
 }

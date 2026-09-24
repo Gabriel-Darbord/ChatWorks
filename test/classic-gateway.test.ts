@@ -216,3 +216,25 @@ test("repeatedly restores the bottom viewport while waiting", async () => {
   assert.equal(result.raw, "Final response");
   assert.equal(fixture.scrolls.length, 2);
 });
+
+test("stops polling when the provider request is cancelled", async () => {
+  const controller = new AbortController();
+  const fixture = operations([
+    observation("Old response"),
+    observation("Partial response"),
+    observation("Partial response"),
+  ]);
+  fixture.operations.wait = async () => {
+    controller.abort(new Error("client disconnected"));
+  };
+  const gateway = classicProviderGateway(fixture.operations, {
+    pollMilliseconds: 0,
+    timeoutMilliseconds: 100,
+  });
+
+  await assert.rejects(
+    gateway.sendAndRead("Provider prompt", undefined, controller.signal),
+    /client disconnected/,
+  );
+  assert.equal(fixture.prompts.length, 1);
+});

@@ -39,8 +39,10 @@ export function classicProviderGateway(
     options.timeoutMilliseconds ?? defaultTimeoutMilliseconds;
 
   return {
-    async sendAndRead(prompt, correlationId) {
+    async sendAndRead(prompt, correlationId, signal) {
+      signal?.throwIfAborted();
       const previous = await operations.observeAssistant();
+      signal?.throwIfAborted();
       await logDebug("classic", "pre-submit-observation", {
         correlationId,
         fields: {
@@ -49,6 +51,7 @@ export function classicProviderGateway(
         },
       });
       const submission = await operations.submit(prompt);
+      signal?.throwIfAborted();
       await logDebug("classic", "submission", {
         correlationId,
         fields: { status: submission },
@@ -63,6 +66,7 @@ export function classicProviderGateway(
         pollMilliseconds,
         timeoutMilliseconds,
         correlationId,
+        signal,
       );
     },
   };
@@ -74,12 +78,14 @@ async function waitForNewAssistantMessage(
   pollMilliseconds: number,
   timeoutMilliseconds: number,
   correlationId?: string,
+  signal?: AbortSignal,
 ) {
   const deadline = Date.now() + timeoutMilliseconds;
   let candidate: AssistantObservation | undefined;
   let poll = 0;
 
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     poll += 1;
     const scrolled = await operations.maintainBottom();
     if (scrolled) {

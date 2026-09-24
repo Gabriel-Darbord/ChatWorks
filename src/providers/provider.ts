@@ -53,7 +53,11 @@ const finishTool = {
 };
 
 export type ClassicProviderGateway = {
-  sendAndRead(prompt: string, correlationId?: string): Promise<Message>;
+  sendAndRead(
+    prompt: string,
+    correlationId?: string,
+    signal?: AbortSignal,
+  ): Promise<Message>;
 };
 
 export type ProviderState = {
@@ -104,7 +108,9 @@ export async function completeProviderRequest(
   state: ProviderState = createProviderState(),
   onIntermediate?: (text: string) => void,
   toolAdapter: ProviderToolAdapter = identityProviderToolAdapter,
+  signal?: AbortSignal,
 ): Promise<OpenAICompletion> {
+  signal?.throwIfAborted();
   const request = decodeProviderRequest(value);
   const turn = providerTurnId();
   prunePendingState(state);
@@ -135,12 +141,13 @@ export async function completeProviderRequest(
     internalTurn <= internalTurnLimit;
     internalTurn += 1
   ) {
+    signal?.throwIfAborted();
     await logDebug("provider", "classic-input", {
       correlationId,
       fields: { prompt, repairCount, internalTurn },
     });
 
-    const message = await gateway.sendAndRead(prompt, correlationId);
+    const message = await gateway.sendAndRead(prompt, correlationId, signal);
 
     await logDebug("provider", "classic-output", {
       correlationId,

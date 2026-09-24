@@ -240,3 +240,49 @@ test("emits an SSE error when a streamed completion fails", async () => {
     assert.match(body, /data: \[DONE\]/);
   });
 });
+
+test("cancels active provider work when its client disconnects", async () => {
+  let started!: () => void;
+  const didStart = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let receivedSignal: AbortSignal | undefined;
+  const server = createProviderServer({
+    async sendAndRead(_prompt, _correlationId, signal) {
+      receivedSignal = signal;
+      started();
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      });
+      throw new Error("Unreachable provider response.");
+    },
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const controller = new AbortController();
+
+  try {
+    const pending = fetch(
+      `http://127.0.0.1:${address.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      },
+    );
+    await didStart;
+    controller.abort();
+    await assert.rejects(pending, /abort/i);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(receivedSignal?.aborted, true);
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});
