@@ -14,6 +14,7 @@ import {
   identityProviderToolAdapter,
   type ProviderToolAdapter,
 } from "./provider-tool-adapter.ts";
+import { decodeProviderRequest } from "./provider-request.ts";
 import { logDebug, logError, logEvent } from "../core/diagnostics.ts";
 
 const maxRequestBytes = 100_000_000;
@@ -76,6 +77,7 @@ export function createProviderServer(
       });
       await logEvent("provider", "queued", { correlationId });
       const streaming = streamRequested(body);
+      decodeProviderRequest(body);
       if (streaming) beginStream(response);
       const completion = await complete(async () => {
         await logEvent("provider", "started", {
@@ -118,6 +120,12 @@ export function createProviderServer(
       });
       await logError("provider-request", error);
       if (response.headersSent) {
+        writeEvent(response, {
+          error: {
+            message,
+            type: "server_error",
+          },
+        });
         response.end("data: [DONE]\n\n");
       } else {
         respondJson(response, 400, {

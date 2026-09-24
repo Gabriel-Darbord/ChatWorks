@@ -201,3 +201,42 @@ test("reports malformed requests without contacting Classic", async () => {
     assert.equal(prompts.length, 0);
   });
 });
+
+test("rejects malformed streaming requests before opening the stream", async () => {
+  await withServer("Unexpected.", async (url, prompts) => {
+    const response = await fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "chatworks-classic",
+        messages: [],
+        stream: true,
+      }),
+    });
+
+    assert.equal(response.status, 400);
+    assert.match(
+      response.headers.get("content-type") ?? "",
+      /application\/json/,
+    );
+    const body = (await response.json()) as { error: { message: string } };
+    assert.match(body.error.message, /at least one message/);
+    assert.equal(prompts.length, 0);
+  });
+});
+
+test("emits an SSE error when a streamed completion fails", async () => {
+  await withServer([], async (url) => {
+    const response = await fetch(`${url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...request, stream: true }),
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /"type":"server_error"/);
+    assert.match(body, /Unexpected provider read/);
+    assert.match(body, /data: \[DONE\]/);
+  });
+});
