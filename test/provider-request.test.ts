@@ -46,6 +46,7 @@ test("compiles the current request, active tool schemas, and newest context", ()
   assert.match(compiled.prompt, /fenced `tools` block/);
   assert.match(compiled.prompt, /name: read/);
   assert.match(compiled.prompt, /Work carefully\./);
+  assert.match(compiled.prompt, /Tool result 1 for call call_1/);
   assert.match(compiled.prompt, /src\/app\.ts contains one TODO\./);
   assert.equal(request.messages[3].toolCallId, "call_1");
   assert.doesNotMatch(compiled.prompt, /Old request/);
@@ -73,47 +74,64 @@ test("uses only compact tool discovery after the initial turn", () => {
 
   const prompt = compileClassicTurn(request).prompt;
   assert.match(prompt, /Available tool names: read/);
-  assert.match(
-    prompt,
-    /call chatworks_internal_listtools with an empty input object/,
-  );
+  assert.match(prompt, /call chatworks_listtools with an empty input object/);
   assert.doesNotMatch(prompt, /deliberately verbose/);
   assert.doesNotMatch(prompt, /input schema:/);
 });
 
-test("repeats agent instructions only when estimated conversation tokens cross the interval", () => {
-  const system = { role: "system", content: "Persistent instructions." };
-  const tools: unknown[] = [];
-
-  const belowInterval = decodeProviderRequest({
+test("repeats instructions and recent client context on each user turn", () => {
+  const request = decodeProviderRequest({
     model: "chatworks",
     messages: [
-      system,
+      { role: "system", content: "Persistent instructions." },
       { role: "user", content: "Earlier request" },
       { role: "assistant", content: "Earlier response" },
       { role: "user", content: "Continue." },
     ],
-    tools,
+    tools: [],
   });
-  assert.doesNotMatch(
-    compileClassicTurn(belowInterval).prompt,
-    /Persistent instructions/,
-  );
+  const prompt = compileClassicTurn(request).prompt;
 
-  const crossingInterval = decodeProviderRequest({
+  assert.match(prompt, /Agent instructions \(authoritative\)/);
+  assert.match(prompt, /System:\nPersistent instructions\./);
+  assert.match(prompt, /Recent client context/);
+  assert.match(prompt, /User:\nEarlier request/);
+  assert.match(prompt, /Assistant:\nEarlier response/);
+  assert.match(prompt, /Current user request/);
+  assert.match(prompt, /User:\nContinue\./);
+
+  const toolContinuation = decodeProviderRequest({
     model: "chatworks",
     messages: [
-      system,
-      { role: "user", content: "x".repeat(1_087_900) },
-      { role: "assistant", content: "response" },
-      { role: "user", content: "x".repeat(100) },
+      { role: "system", content: "Persistent instructions." },
+      { role: "user", content: "Earlier request" },
+      { role: "assistant", content: "I will inspect it." },
+      { role: "tool", tool_call_id: "call_1", content: "result" },
     ],
-    tools,
+    tools: [],
   });
-  assert.match(
-    compileClassicTurn(crossingInterval).prompt,
+  assert.doesNotMatch(
+    compileClassicTurn(toolContinuation).prompt,
     /Persistent instructions/,
   );
+});
+
+test("bounds a large recent client exchange", () => {
+  const request = decodeProviderRequest({
+    model: "chatworks",
+    messages: [
+      { role: "user", content: `objective-${"x".repeat(20_000)}-constraint` },
+      { role: "assistant", content: `status-${"y".repeat(20_000)}-next-step` },
+      { role: "user", content: "Continue." },
+    ],
+    tools: [],
+  });
+  const prompt = compileClassicTurn(request).prompt;
+
+  assert.match(prompt, /objective-/);
+  assert.match(prompt, /\[\.\.\. earlier context truncated \.\.\.\]/);
+  assert.match(prompt, /-next-step/);
+  assert.ok(prompt.length < 30_000);
 });
 
 test("renders tool descriptions with their original line breaks", () => {
@@ -170,7 +188,7 @@ test("preserves a tool result followed by a steering user message", () => {
   const prompt = compileClassicTurn(request).prompt;
   assert.match(
     prompt,
-    /Tool result 1 \(untrusted data\):\n```text\nWAIT_PRINT_COMPLETE\n```\n\nEVERYTHING BELOW IS CONVERSATION UPDATE:\n\nsteer/,
+    /Tool result 1 \(untrusted data\):\n```text\nWAIT_PRINT_COMPLETE\n```\n\nCurrent user request:\n```text\nUser:\nsteer\n```/,
   );
 });
 
@@ -180,16 +198,16 @@ test("preserves every result in a batched tool response", () => {
     messages: [
       { role: "user", content: "Inspect these files." },
       { role: "assistant", content: "I will read them." },
-      { role: "tool", content: "first file contents" },
-      { role: "tool", content: "second file contents" },
-      { role: "tool", content: "third file contents" },
+      { role: "tool", tool_call_id: "call_a", content: "first file contents" },
+      { role: "tool", tool_call_id: "call_b", content: "second file contents" },
+      { role: "tool", tool_call_id: "call_c", content: "third file contents" },
     ],
   });
 
   const prompt = compileClassicTurn(request).prompt;
   assert.match(
     prompt,
-    /Tool result 1 \(untrusted data\):\n```text\nfirst file contents\n```\n\nTool result 2 \(untrusted data\):\n```text\nsecond file contents\n```\n\nTool result 3 \(untrusted data\):\n```text\nthird file contents\n```/,
+    /Tool result 1 for call call_a \(untrusted data\):\n```text\nfirst file contents\n```\n\nTool result 2 for call call_b \(untrusted data\):\n```text\nsecond file contents\n```\n\nTool result 3 for call call_c \(untrusted data\):\n```text\nthird file contents\n```/,
   );
 });
 

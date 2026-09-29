@@ -62,6 +62,8 @@ curl http://127.0.0.1:32123/v1/chat/completions \
 
 ChatWorks accepts text messages with `system`, `developer`, `user`, `assistant`, and `tool` roles. OpenAI-style text content arrays are supported; non-text content parts are rejected with an actionable error.
 
+Each user-bearing request refreshes its system and developer instructions and includes one bounded recent user/assistant exchange. Tool-result-only continuations send only the new results because the selected ChatGPT conversation already contains the active turn.
+
 ## Tool loop
 
 Client tools are passed through without client-specific rewriting. Their names, descriptions, and JSON input schemas are presented to ChatGPT. The assistant requests operations using one or more ordered `tools` fences, with one JSON object per non-empty line:
@@ -75,7 +77,7 @@ Client tools are passed through without client-specific rewriting. Their names, 
 
 ChatWorks validates the complete batch before returning native tool calls. A malformed batch does not execute a valid prefix. Independent calls should share as few blocks as practical; dependent calls should wait for earlier results.
 
-ChatWorks also adds namespaced control tools for catalog discovery and turn completion. Their exact names are included in the prompt. The default namespace is `chatworks_internal`; if a client tool already uses either generated name, both controls move to the next free numbered namespace.
+ChatWorks also adds control tools for catalog discovery and turn completion. Their exact names are included in the prompt. Turn completion is `chatworks` and catalog discovery is `chatworks_listtools`; if either conflicts with a client tool, ChatWorks appends a unique id to both names.
 
 Tool outputs are clearly delimited as untrusted data before they are returned to ChatGPT. Instructions found inside tool output are not part of the agent or user prompt.
 

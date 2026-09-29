@@ -180,9 +180,18 @@ export async function completeDecodedProviderRequest(
     }
 
     if (result.kind === "text") {
+      const finishExample = JSON.stringify({
+        name: internalTools.names.finish,
+        input: { conclusion: "Your final response" },
+      });
       prompt = [
         "The coding-agent turn is still active. Continue working on the current task: reason through what remains, investigate or verify assumptions, and use the available tools whenever they can materially advance the work. Do not stop merely because you have an intermediate result or no immediate tool call to make.",
-        `When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn by calling \`${internalTools.names.finish}\` with a \`conclusion\` string. The conclusion becomes the final response to the user and should concisely summarize the work performed, important decisions or conclusions, the resulting state, relevant verification, and anything that remains unresolved or requires user input.`,
+        "Invoke every tool by writing one JSON object per call inside a fenced `tools` block.",
+        `When the task is complete, or further progress requires information or action only the user can provide, end the coding-agent turn with this tool call:`,
+        "```tools",
+        finishExample,
+        "```",
+        `Replace the example conclusion with the final response. Do not call \`${internalTools.names.finish}\` alongside another tool.`,
         "",
         formatSection(
           "Active tools",
@@ -303,18 +312,16 @@ function createInternalProviderTools(
   tools: ProviderTool[],
 ): InternalProviderTools {
   const unavailableNames = new Set(tools.map((tool) => tool.name));
-  let namespace = "chatworks_internal";
-  let suffix = 2;
+  let namespace = "chatworks";
   while (
-    unavailableNames.has(`${namespace}_finish`) ||
+    unavailableNames.has(namespace) ||
     unavailableNames.has(`${namespace}_listtools`)
   ) {
-    namespace = `chatworks_internal_${suffix}`;
-    suffix += 1;
+    namespace = `chatworks_${providerTurnId()}`;
   }
 
   const names = {
-    finish: `${namespace}_finish`,
+    finish: namespace,
     listTools: `${namespace}_listtools`,
   };
   return {
