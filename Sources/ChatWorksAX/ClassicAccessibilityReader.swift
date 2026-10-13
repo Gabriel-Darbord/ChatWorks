@@ -4,6 +4,7 @@ import Foundation
 /// ChatGPT Classic exposes assistant code as a heading such as "Bash code
 /// block" followed by the exact source in an AXStaticText sibling.
 struct ClassicAccessibilityElementSnapshot {
+  let traversalIndex: Int
   let role: String?
   let description: String?
   let frame: CGRect?
@@ -73,6 +74,7 @@ struct ClassicAccessibilityReader {
       let traversalIndex = result.count
       result.append(
         ClassicAccessibilityElementSnapshot(
+          traversalIndex: traversalIndex,
           role: stringAttribute(kAXRoleAttribute, of: next.element),
           description: stringAttribute(kAXDescriptionAttribute, of: next.element),
           frame: frame(of: next.element),
@@ -120,7 +122,11 @@ func classicAssistantParts(
     if isCodeBlockHeading(element),
       isAssistantElement(element, assistantLaneEnd: assistantLaneEnd),
       let sourceIndex = elements[(index + 1)...].indices.first(where: {
-        elements[$0].parentTraversalIndex == element.parentTraversalIndex
+        isCodeSource(
+          at: $0,
+          afterHeadingAt: index,
+          in: elements
+        )
           && elements[$0].role == kAXStaticTextRole
           && isAssistantElement(elements[$0], assistantLaneEnd: assistantLaneEnd)
           && staticText(of: elements[$0]) != nil
@@ -155,6 +161,38 @@ func classicAssistantParts(
   }
 
   return accessibilityMessagePartsInVisualOrder(parts)
+}
+
+private func isCodeSource(
+  at sourceIndex: Int,
+  afterHeadingAt headingIndex: Int,
+  in elements: [ClassicAccessibilityElementSnapshot]
+) -> Bool {
+  let heading = elements[headingIndex]
+  guard let parentIndex = heading.parentTraversalIndex else { return false }
+
+  // Older Classic layouts exposed the code source as a direct sibling of its
+  // "<language> code block" heading. Current layouts place it inside the next
+  // AXScrollArea sibling, so associate text through that immediate container.
+  if elements[sourceIndex].parentTraversalIndex == parentIndex { return true }
+  guard
+    let nextSiblingIndex = elements.indices.first(where: {
+      $0 > headingIndex && elements[$0].parentTraversalIndex == parentIndex
+    })
+  else {
+    return false
+  }
+  let nextSiblingTraversalIndex = elements[nextSiblingIndex].traversalIndex
+
+  var ancestorIndex = elements[sourceIndex].parentTraversalIndex
+  while let currentIndex = ancestorIndex {
+    if currentIndex == nextSiblingTraversalIndex { return true }
+    guard let ancestor = elements.first(where: { $0.traversalIndex == currentIndex }) else {
+      return false
+    }
+    ancestorIndex = ancestor.parentTraversalIndex
+  }
+  return false
 }
 
 private func isCodeBlockHeading(_ element: ClassicAccessibilityElementSnapshot) -> Bool {

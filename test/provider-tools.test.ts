@@ -96,6 +96,47 @@ test("returns ordinary assistant text without a tool delimiter", () => {
   );
 });
 
+test("rejects adjacent bare JSON calls without executing them", () => {
+  const result = parseProviderToolBlocks(
+    parseMessage(
+      '{"name":"read","input":{"path":"src/a.ts"}}{"name":"grep","input":{"pattern":"TODO"}}',
+    ),
+    tools,
+    "turn_bare",
+  );
+
+  assert.equal(result.kind, "repair");
+  assert.match(result.message, /no fenced `tools` block was found/);
+  assert.match(result.message, /Nothing was executed/);
+  assert.doesNotMatch(JSON.stringify(result), /chatworks_turn_bare_1/);
+});
+
+test("rejects JSON calls in a code fence without the tools marker", () => {
+  const result = parseProviderToolBlocks(
+    parseMessage('```json\n{"name":"read","input":{"path":"src/a.ts"}}\n```'),
+    tools,
+    "turn_unmarked",
+  );
+
+  assert.equal(result.kind, "repair");
+  assert.match(result.message, /no fenced `tools` block was found/);
+  assert.match(result.message, /Nothing was executed/);
+});
+
+test("does not extract bare JSON tool calls from surrounding prose", () => {
+  assert.deepEqual(
+    parseProviderToolBlocks(
+      parseMessage('Try this: {"name":"read","input":{"path":"src/a.ts"}}'),
+      tools,
+      "turn_bare_prose",
+    ),
+    {
+      kind: "text",
+      text: 'Try this: {"name":"read","input":{"path":"src/a.ts"}}',
+    },
+  );
+});
+
 test("preserves ordinary fenced blocks alongside tool calls", () => {
   const result = parseProviderToolBlocks(
     parseMessage(

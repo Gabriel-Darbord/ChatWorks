@@ -54,7 +54,19 @@ export function parseProviderToolBlocks(
     part.kind === "block" && part.language === "tools" ? [index] : [],
   );
   if (toolPartIndexes.length === 0) {
-    return { kind: "text", text: messageText(message).trim() };
+    const plainText = messageText(message).trim();
+    const jsonCalls = parseBareToolCalls(plainText);
+    const unmarkedCodeCalls = parts.some(
+      (part) =>
+        part.kind === "block" && parseBareToolCalls(part.source) !== undefined,
+    );
+    if (!jsonCalls && !unmarkedCodeCalls)
+      return { kind: "text", text: plainText };
+    return repair(
+      1,
+      "a tool call was written as JSON, but no fenced `tools` block was found. Nothing was executed.",
+      exampleFor(tools[0]),
+    );
   }
 
   const toolPartIndexSet = new Set(toolPartIndexes);
@@ -67,8 +79,7 @@ export function parseProviderToolBlocks(
       ),
   }).trim();
 
-  const available = new Map(tools.map((tool) => [tool.name, tool]));
-  const calls: ProviderToolCall[] = [];
+  const envelopes: string[] = [];
 
   for (const toolPartIndex of toolPartIndexes) {
     const toolsPart = parts[toolPartIndex];
@@ -80,35 +91,87 @@ export function parseProviderToolBlocks(
       .filter(Boolean);
     if (callLines.length === 0) {
       return repair(
-        calls.length + 1,
+        envelopes.length + 1,
         "the tools block contains no tool calls",
         exampleFor(tools[0]),
       );
     }
 
-    for (const line of callLines) {
-      const callIndex = calls.length + 1;
-      const parsed = parseEnvelope(line, callIndex, tools);
-      if (parsed.kind === "repair") return parsed;
-
-      const tool = available.get(parsed.name);
-      if (!tool) return repairUnknownTool(callIndex, parsed.name, tools);
-
-      const missing = (tool.input?.required ?? []).filter(
-        (field) => !(field in parsed.input),
-      );
-      if (missing.length > 0)
-        return repairMissingInput(callIndex, tool, missing[0]);
-
-      calls.push({
-        id: `chatworks_${providerTurn}_${callIndex}`,
-        name: parsed.name,
-        input: parsed.input,
-      });
-    }
+    envelopes.push(...callLines);
   }
 
+  return validateCalls(envelopes, tools, providerTurn, text);
+}
+
+function validateCalls(
+  envelopes: string[],
+  tools: ProviderTool[],
+  providerTurn: string,
+  text: string,
+): ToolProtocolResult {
+  const available = new Map(tools.map((tool) => [tool.name, tool]));
+  const calls: ProviderToolCall[] = [];
+  for (const envelope of envelopes) {
+    const callIndex = calls.length + 1;
+    const parsed = parseEnvelope(envelope, callIndex, tools);
+    if (parsed.kind === "repair") return parsed;
+    const tool = available.get(parsed.name);
+    if (!tool) return repairUnknownTool(callIndex, parsed.name, tools);
+    const missing = (tool.input?.required ?? []).filter(
+      (field) => !(field in parsed.input),
+    );
+    if (missing.length > 0)
+      return repairMissingInput(callIndex, tool, missing[0]);
+    calls.push({
+      id: `chatworks_${providerTurn}_${callIndex}`,
+      name: parsed.name,
+      input: parsed.input,
+    });
+  }
   return { kind: "tool-calls", text, calls };
+}
+
+// Some Classic versions render consecutive JSON tool objects as ordinary text
+// instead of exposing their fenced code block through Accessibility.
+function parseBareToolCalls(source: string): string[] | undefined {
+  const values: string[] = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    if (source[cursor] !== "{") return undefined;
+    const start = cursor;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (; cursor < source.length; cursor += 1) {
+      const character = source[cursor];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === "{") depth += 1;
+      else if (character === "}" && --depth === 0) {
+        cursor += 1;
+        values.push(source.slice(start, cursor));
+        break;
+      }
+    }
+    if (depth !== 0 || inString) return undefined;
+  }
+  return values.length > 0 &&
+    values.every((value) => {
+      try {
+        const parsed = JSON.parse(value) as ToolEnvelope;
+        return typeof parsed.name === "string" && "input" in parsed;
+      } catch {
+        return false;
+      }
+    })
+    ? values
+    : undefined;
 }
 
 function parseEnvelope(

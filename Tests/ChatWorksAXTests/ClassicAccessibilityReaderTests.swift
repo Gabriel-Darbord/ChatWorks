@@ -44,13 +44,50 @@ struct ClassicAccessibilityReaderTests {
     )
   }
 
+  @Test("pairs a code block heading with source nested in its scroll-area sibling")
+  func nestedStructuralCodeSource() {
+    let parts = classicAssistantParts(
+      in: [
+        element(
+          role: kAXHeadingRole,
+          description: "Tools code block",
+          y: 20,
+          parent: 20,
+          traversalIndex: 21
+        ),
+        element(
+          role: kAXScrollAreaRole,
+          description: "",
+          y: 30,
+          parent: 20,
+          traversalIndex: 22
+        ),
+        element(
+          role: kAXStaticTextRole,
+          description: "{\"name\":\"pharo_class_search\",\"input\":{\"query\":\"FamixValueFrame\"}}",
+          y: 40,
+          parent: 22,
+          traversalIndex: 23
+        ),
+      ],
+      assistantLaneEnd: 100
+    )
+
+    #expect(
+      accessibilityMessageText(parts)
+        == "```tools\n{\"name\":\"pharo_class_search\",\"input\":{\"query\":\"FamixValueFrame\"}}\n```"
+    )
+  }
+
   private func element(
     role: String,
     description: String,
     y: CGFloat,
-    parent: Int
+    parent: Int,
+    traversalIndex: Int = 0
   ) -> ClassicAccessibilityElementSnapshot {
     ClassicAccessibilityElementSnapshot(
+      traversalIndex: traversalIndex,
       role: role,
       description: description,
       frame: CGRect(x: 10, y: y, width: 80, height: 10),
