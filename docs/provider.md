@@ -166,3 +166,5 @@ The profile disables Codex-native web search, apps, memories, subagents, and the
 ## Operational limits
 
 ChatWorks waits up to 120 seconds for each stable ChatGPT response and polls every 250 milliseconds. A provider turn permits up to 16 internal ChatGPT responses and two malformed-tool repair attempts. These values are implementation defaults rather than CLI options.
+
+ChatWorks uses a conservative 64,000 UTF-8 byte threshold after observing Classic reject a 66,676-byte inline message. Larger prompts are sent as a `ChatWorks message.txt` attachment with a short inline instruction. File attachment requires temporary keyboard focus, so start the provider with `--interaction focus` when oversized prompts are possible. ChatWorks activates and verifies the selected application before sending synthetic input, then restores the previous focus and clipboard. `background` mode rejects an oversized prompt before changing the composer.

@@ -4,6 +4,25 @@ import Testing
 
 @Suite("Composer semantics")
 struct ComposerSemanticsTests {
+  @Test("messages beyond the inline byte limit require an attachment")
+  func oversizedMessage() {
+    #expect(
+      !ComposerSemantics.requiresTextAttachment(
+        String(repeating: "a", count: ComposerSemantics.inlineMessageByteThreshold)
+      )
+    )
+    #expect(
+      ComposerSemantics.requiresTextAttachment(
+        String(repeating: "a", count: ComposerSemantics.inlineMessageByteThreshold + 1)
+      )
+    )
+    #expect(
+      ComposerSemantics.requiresTextAttachment(
+        String(repeating: "é", count: ComposerSemantics.inlineMessageByteThreshold / 2 + 1)
+      )
+    )
+  }
+
   @Test("empty value is empty")
   func emptyValue() {
     #expect(

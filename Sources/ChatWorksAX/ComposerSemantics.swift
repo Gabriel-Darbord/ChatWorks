@@ -1,6 +1,12 @@
 import Foundation
 
 enum ComposerSemantics {
+  static let inlineMessageByteThreshold = 64_000
+
+  static func requiresTextAttachment(_ text: String) -> Bool {
+    text.utf8.count > inlineMessageByteThreshold
+  }
+
   static func isEmpty(
     value: String,
     descriptiveLabels: [String]

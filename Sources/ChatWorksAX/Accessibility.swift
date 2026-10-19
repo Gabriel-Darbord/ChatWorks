@@ -23,6 +23,8 @@ public enum AccessibilityError: LocalizedError {
   case clipboardDidNotChange
   case interactionRequiresFocus
   case interactionRequiresPointer
+  case oversizedMessageRequiresFocus(size: Int, threshold: Int)
+  case targetApplicationDidNotActivate(String)
 
   public var errorDescription: String? {
     switch self {
@@ -75,6 +77,12 @@ public enum AccessibilityError: LocalizedError {
         "This ChatGPT control requires focus. Retry with --interaction focus or --interaction pointer."
     case .interactionRequiresPointer:
       return "This ChatGPT control requires pointer input. Retry with --interaction pointer."
+    case .oversizedMessageRequiresFocus(let size, let threshold):
+      return
+        "This message is \(size) UTF-8 bytes. ChatWorks attaches messages above \(threshold) bytes; retry with --interaction focus or --interaction pointer."
+    case .targetApplicationDidNotActivate(let identifier):
+      return
+        "Could not activate \(identifier) for synthetic input; no keyboard or pointer event was sent."
     }
   }
 }
@@ -174,12 +182,16 @@ private enum StageAssessment {
 
 public struct ChatGPTAccessibility {
   let application: AXUIElement
+  private let runningApplication: NSRunningApplication
   private let previousFocus: FocusSnapshot
   private let interactionState = InteractionState()
   private let interactionPolicy: InteractionPolicy
   private let requiresChatMode: Bool
   private let classicAccessibilityReader: ClassicAccessibilityReader?
   private static let supportedBundleIdentifiers = ["com.openai.codex", "com.openai.chat"]
+  private static let oversizedMessageFilename = "ChatWorks message.txt"
+  private static let oversizedMessageInstruction =
+    "The complete message for this turn is attached as ChatWorks message.txt. Read it in full and follow it as the message."
   // Physical clicks are compatibility fallbacks for controls whose semantic
   // AX actions are ineffective. Never leave the user's pointer at the
   // synthetic interaction location.
@@ -206,6 +218,7 @@ public struct ChatGPTAccessibility {
 
     return Self(
       application: AXUIElementCreateApplication(application.processIdentifier),
+      runningApplication: application,
       previousFocus: previousFocus,
       interactionPolicy: interactionPolicy,
       requiresChatMode: application.bundleIdentifier != "com.openai.chat",
@@ -324,25 +337,33 @@ public struct ChatGPTAccessibility {
     return ComposerState(availability: .unavailable)
   }
 
-  private func typeDraft(_ text: String) throws -> [NSPasteboardItem]? {
-    guard let input = waitsForEditableInput() else {
-      throw AccessibilityError.inputNotFound
-    }
-
-    // Setting a writable AX value does not require activation, focus, or
-    // synthetic keyboard input. Prefer it for the normal background path.
-    let valueResult = AXUIElementSetAttributeValue(
-      input,
-      kAXValueAttribute as CFString,
-      text as CFTypeRef
-    )
-    if valueResult == .success {
-      return nil
-    }
-
+  private func activateForSyntheticInput() throws {
     guard interactionPolicy.allowsFocus else {
       throw AccessibilityError.interactionRequiresFocus
     }
+
+    interactionState.didTakeFocus = true
+    let identifier =
+      runningApplication.bundleIdentifier ?? runningApplication.localizedName ?? "ChatGPT"
+    guard runningApplication.activate(options: []) else {
+      throw AccessibilityError.targetApplicationDidNotActivate(identifier)
+    }
+
+    let deadline = Date().addingTimeInterval(1)
+    while Date() < deadline {
+      if NSWorkspace.shared.frontmostApplication?.processIdentifier
+        == runningApplication.processIdentifier
+      {
+        return
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    throw AccessibilityError.targetApplicationDidNotActivate(identifier)
+  }
+
+  private func focusComposerForSyntheticInput(_ input: AXUIElement) throws {
+    try activateForSyntheticInput()
 
     let focusResult = AXUIElementSetAttributeValue(
       input,
@@ -352,25 +373,9 @@ public struct ChatGPTAccessibility {
     guard focusResult == .success else {
       throw AccessibilityError.writeFailed("focus ChatGPT composer", focusResult)
     }
-    interactionState.didTakeFocus = true
+  }
 
-    let pasteboard = NSPasteboard.general
-    let previousItems =
-      pasteboard.pasteboardItems?.compactMap { item -> NSPasteboardItem? in
-        let copy = NSPasteboardItem()
-        var copied = false
-        for type in item.types {
-          if let data = item.data(forType: type) {
-            copy.setData(data, forType: type)
-            copied = true
-          }
-        }
-        return copied ? copy : nil
-      } ?? []
-
-    pasteboard.clearContents()
-    pasteboard.setString(text, forType: .string)
-
+  private func postPasteShortcut() {
     let keySource = CGEventSource(stateID: .hidSystemState)
     let keyDown = CGEvent(
       keyboardEventSource: keySource,
@@ -386,16 +391,109 @@ public struct ChatGPTAccessibility {
     keyUp?.flags = .maskCommand
     keyDown?.post(tap: .cghidEventTap)
     keyUp?.post(tap: .cghidEventTap)
-
-    return previousItems
   }
 
-  private func restorePasteboard(_ previousItems: [NSPasteboardItem]) {
+  private func typeDraft(_ text: String) throws -> ClipboardSnapshot? {
+    guard let input = waitsForEditableInput() else {
+      throw AccessibilityError.inputNotFound
+    }
+
+    // Setting a writable AX value does not require activation, focus, or
+    // synthetic keyboard input. Prefer it for the normal background path.
+    let valueResult = AXUIElementSetAttributeValue(
+      input,
+      kAXValueAttribute as CFString,
+      text as CFTypeRef
+    )
+    if valueResult == .success {
+      return nil
+    }
+
+    try focusComposerForSyntheticInput(input)
+
+    let pasteboard = NSPasteboard.general
+    let clipboard = ClipboardSnapshot.capture()
+
+    pasteboard.clearContents()
+    pasteboard.setString(text, forType: .string)
+    postPasteShortcut()
+
+    return clipboard
+  }
+
+  private func stageOversizedTextAttachment(_ text: String) throws {
+    guard let input = waitsForEditableInput() else {
+      throw AccessibilityError.inputNotFound
+    }
+    try focusComposerForSyntheticInput(input)
+
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "chatworks-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    let file = directory.appendingPathComponent(Self.oversizedMessageFilename)
+    try text.write(to: file, atomically: true, encoding: .utf8)
+
+    // shortcut: attachment files rely on system temporary-directory cleanup;
+    // retain explicit lifecycle state only if accumulation becomes measurable.
+    let clipboard = ClipboardSnapshot.capture()
+    defer { clipboard.restore() }
     let pasteboard = NSPasteboard.general
     pasteboard.clearContents()
-    if !previousItems.isEmpty {
-      pasteboard.writeObjects(previousItems)
+    guard pasteboard.writeObjects([file as NSURL]) else {
+      throw AccessibilityError.writeFailed(
+        "place oversized ChatGPT message attachment on the clipboard",
+        .failure
+      )
     }
+    postPasteShortcut()
+
+    let attachmentDeadline = Date().addingTimeInterval(10)
+    while Date() < attachmentDeadline {
+      if composerSnapshot().pastedTextAttachmentPresent {
+        break
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    guard composerSnapshot().pastedTextAttachmentPresent else {
+      throw AccessibilityError.writeFailed(
+        "verify oversized ChatGPT message attachment",
+        .failure
+      )
+    }
+
+    let instructionResult = AXUIElementSetAttributeValue(
+      input,
+      kAXValueAttribute as CFString,
+      Self.oversizedMessageInstruction as CFTypeRef
+    )
+    guard instructionResult == .success else {
+      throw AccessibilityError.writeFailed(
+        "stage oversized ChatGPT message instruction",
+        instructionResult
+      )
+    }
+
+    let readyDeadline = Date().addingTimeInterval(3)
+    while Date() < readyDeadline {
+      let snapshot = composerSnapshot()
+      if snapshot.sendPresent,
+        snapshot.pastedTextAttachmentPresent,
+        !snapshot.isEmpty
+      {
+        return
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+
+    throw AccessibilityError.writeFailed(
+      "verify oversized ChatGPT message instruction",
+      .failure
+    )
   }
 
   private func clearComposerContents() throws {
@@ -458,6 +556,7 @@ public struct ChatGPTAccessibility {
       guard
         labels.contains(where: {
           $0.caseInsensitiveCompare("Pasted text.txt") == .orderedSame
+            || $0.caseInsensitiveCompare(Self.oversizedMessageFilename) == .orderedSame
         })
       else {
         return false
@@ -652,13 +751,26 @@ public struct ChatGPTAccessibility {
       throw AccessibilityError.inputNotFound
     }
 
+    let requiresAttachment = ComposerSemantics.requiresTextAttachment(text)
+    if requiresAttachment, !interactionPolicy.allowsFocus {
+      throw AccessibilityError.oversizedMessageRequiresFocus(
+        size: text.utf8.count,
+        threshold: ComposerSemantics.inlineMessageByteThreshold
+      )
+    }
+
     try clearComposerContents()
 
+    if requiresAttachment {
+      try stageOversizedTextAttachment(text)
+      return
+    }
+
     let baseline = composerSnapshot()
-    let previousPasteboardItems = try typeDraft(text)
+    let previousClipboard = try typeDraft(text)
     defer {
-      if let previousPasteboardItems {
-        restorePasteboard(previousPasteboardItems)
+      if let previousClipboard {
+        previousClipboard.restore()
       }
     }
 
@@ -1017,6 +1129,7 @@ public struct ChatGPTAccessibility {
     newTitle: String
   ) throws {
     try openRenameChat(reference)
+    try activateForSyntheticInput()
 
     guard !newTitle.isEmpty,
       let source = CGEventSource(stateID: .hidSystemState)
@@ -1275,18 +1388,7 @@ public struct ChatGPTAccessibility {
       throw AccessibilityError.interactionRequiresFocus
     }
 
-    let focusResult = AXUIElementSetAttributeValue(
-      input,
-      kAXFocusedAttribute as CFString,
-      kCFBooleanTrue
-    )
-    guard focusResult == .success else {
-      throw AccessibilityError.writeFailed(
-        "focus ChatGPT composer",
-        focusResult
-      )
-    }
-    interactionState.didTakeFocus = true
+    try focusComposerForSyntheticInput(input)
 
     let keySource = CGEventSource(stateID: .hidSystemState)
     CGEvent(
@@ -1765,7 +1867,7 @@ public struct ChatGPTAccessibility {
     guard interactionPolicy.allowsPointer else {
       throw AccessibilityError.interactionRequiresPointer
     }
-    interactionState.didTakeFocus = true
+    try activateForSyntheticInput()
     let source = CGEventSource(stateID: .hidSystemState)
     let center = CGPoint(x: frame.midX, y: frame.midY)
     let originalLocation = CGEvent(source: nil)?.location
