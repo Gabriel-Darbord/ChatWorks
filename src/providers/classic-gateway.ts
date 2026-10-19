@@ -82,6 +82,7 @@ async function waitForNewAssistantMessage(
 ) {
   const deadline = Date.now() + timeoutMilliseconds;
   let candidate: AssistantObservation | undefined;
+  let observedPostSubmitActivity = false;
   let poll = 0;
 
   while (Date.now() < deadline) {
@@ -108,11 +109,21 @@ async function waitForNewAssistantMessage(
         ),
       },
     });
+    const sameAsPrevious = Boolean(
+      observation && previous && sameAssistantMessage(previous, observation),
+    );
+    if (
+      observation &&
+      (observation.latestMessageRole !== "assistant" ||
+        isAccessibilityPlaceholder(observation))
+    ) {
+      observedPostSubmitActivity = true;
+    }
     if (
       !observation ||
       observation.latestMessageRole !== "assistant" ||
       isAccessibilityPlaceholder(observation) ||
-      (previous && sameAssistantMessage(previous, observation))
+      (sameAsPrevious && !observedPostSubmitActivity)
     ) {
       candidate = undefined;
       await operations.wait(pollMilliseconds);

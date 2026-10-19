@@ -92,6 +92,43 @@ test("does not accept a transient AX object-replacement placeholder as a reply",
   assert.equal(result.raw, "Actual response");
 });
 
+test("accepts an identical reply after Classic exposes post-submit placeholders", async () => {
+  const repeatedToolCall = '```tools\n{"name":"search","input":{}}\n```';
+  const fixture = operations([
+    observation(repeatedToolCall),
+    observation("\uFFFC"),
+    observation("\uFFFC"),
+    observation(repeatedToolCall),
+    observation(repeatedToolCall),
+  ]);
+  const gateway = classicProviderGateway(fixture.operations, {
+    pollMilliseconds: 0,
+    timeoutMilliseconds: 100,
+  });
+
+  const result = await gateway.sendAndRead("Provider prompt");
+
+  assert.equal(result.raw, repeatedToolCall);
+});
+
+test("does not mistake a reverted transient response for an identical reply", async () => {
+  const fixture = operations([
+    observation("Old response"),
+    observation("Transient response"),
+    observation("Old response"),
+    observation("Old response"),
+  ]);
+  const gateway = classicProviderGateway(fixture.operations, {
+    pollMilliseconds: 0,
+    timeoutMilliseconds: 10,
+  });
+
+  await assert.rejects(
+    gateway.sendAndRead("Provider prompt"),
+    /Timed out waiting for a new stable ChatGPT Classic response/,
+  );
+});
+
 test("waits for the composer before accepting a stable reply", async () => {
   const fixture = operations(
     [
