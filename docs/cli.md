@@ -57,11 +57,11 @@ Global options may appear before or after the command.
 
 - `--modules <ids>`: activate comma-separated modules. Available ids are `shell`, `chatworks`, and `discussion`; `none` disables all modules.
 - `--app classic|desktop`: target ChatGPT Classic (`com.openai.chat`) or the current desktop app (`com.openai.codex`). Selection is required when both are running and is mandatory for `provider`.
-- `--interaction background|focus|pointer`: choose the allowed UI interaction policy. The default is `background`.
+- `--interaction background|focus|pointer`: set the most intrusive UI fallback ChatWorks may use. The default is `background`.
 - `--as <participant>`: execute `once` or `run` in a participant's execution scope.
 - `--checkpoint`: after an executed turn, run repository checks and commit the working tree when appropriate.
 
-`background` avoids activating ChatGPT, moving the pointer, or sending keyboard input when semantic Accessibility operations work. `focus` permits focused keyboard fallback. `pointer` also permits physical pointer fallback. ChatWorks restores focus and pointer state after bridge operations.
+The interaction policy is a permission ceiling, not an execution mode. `background` uses semantic Accessibility operations only and fails when they are insufficient. `focus` also permits temporary app activation and keyboard input. `pointer` additionally permits physical pointer input as a last resort. ChatWorks restores focus and pointer state after bridge operations. See the provider guide's [Interaction policy](provider.md#interaction-policy) section for examples and the oversized-prompt consequence.
 
 ## Trigger contract
 

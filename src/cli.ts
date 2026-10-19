@@ -84,7 +84,7 @@ const usage = `Usage:
     --turn[=N]                      Make N full round-robin turns (default: 1).
   --modules <ids>                    Activate comma-separated modules: shell, chatworks, discussion, or none.
   --app <application>                Target "classic" or "desktop" ChatGPT; required when both are open.
-  --interaction <policy>             Use "background" (default), "focus", or "pointer" UI interaction.
+  --interaction <policy>             Allow AX-only "background" (default), "focus", or "pointer" fallback.
   --as <participant>                 Execute once/run as a ChatWorks participant.
   --checkpoint                       Check and commit the working tree after each executed turn.`;
 

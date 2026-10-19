@@ -26,6 +26,28 @@ Options:
 
 The server binds only to `127.0.0.1`. It does not require or validate an API key. If a client requires a non-empty key, use any local placeholder value.
 
+## Interaction policy
+
+The global `--interaction` option sets the most intrusive fallback ChatWorks may use. It is a permission ceiling, not a separate provider mode:
+
+- `background` (default): use semantic Accessibility operations only. ChatWorks does not activate ChatGPT, send keyboard events, or move the pointer. An operation fails safely if Accessibility alone cannot perform it.
+- `focus`: also permit ChatWorks to activate the selected ChatGPT application and send keyboard input. ChatWorks restores the previously active application and focused element afterward. This is currently required to attach oversized prompts.
+- `pointer`: also permit physical pointer fallback when neither Accessibility nor keyboard input works. ChatWorks restores the pointer position afterward. Use this only for controls that require it.
+
+For the default, least intrusive provider:
+
+```sh
+npm start -- --app classic --interaction background provider
+```
+
+To permit oversized prompts to be attached as text files:
+
+```sh
+npm start -- --app classic --interaction focus provider
+```
+
+The option may appear before or after `provider`. Selecting `classic` or `desktop` remains independent of the interaction policy; synthetic input is sent only after ChatWorks verifies that the selected application is frontmost.
+
 ## Client configuration
 
 Configure an OpenAI-compatible client with:
