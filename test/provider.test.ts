@@ -328,7 +328,7 @@ test("emits all Classic prose while continuing internally until finish", async (
     fixture.prompts[1],
     /```tools\n{"name":"chatworks","input":{"conclusion":"Your final response"}}\n```/,
   );
-  assert.deepEqual(intermediate, ["Partial finding."]);
+  assert.deepEqual(intermediate, ["Partial finding.\n\n"]);
   assert.equal(result.choices[0].message.content, "Done.");
   assert.equal(result.choices[0].finish_reason, "stop");
 });

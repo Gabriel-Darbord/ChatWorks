@@ -241,19 +241,54 @@ test("streams prose-only internal iterations before the final response", async (
 
       assert.equal(response.status, 200);
       const body = await response.text();
-      const intermediateIndex = body.indexOf('"content":"Partial finding."');
+      const intermediateIndex = body.indexOf(
+        '"content":"Partial finding.\\n\\n"',
+      );
       const finalIndex = body.indexOf('"content":"Done."');
       assert.ok(intermediateIndex >= 0);
       assert.ok(finalIndex >= 0);
       assert.ok(intermediateIndex < finalIndex);
-      assert.equal(body.split('"content":"Partial finding."').length - 1, 1);
+      assert.equal(
+        body.split('"content":"Partial finding.\\n\\n"').length - 1,
+        1,
+      );
       assert.equal(body.split('"content":"Done."').length - 1, 1);
       assert.match(
         body,
-        /"content":"Partial finding\."[^\n]*"finish_reason":null/,
+        /"content":"Partial finding\.\\n\\n"[^\n]*"finish_reason":null/,
       );
       assert.match(body, /"finish_reason":"stop"/);
       assert.equal(prompts.length, 2);
+    },
+  );
+});
+
+test("separates prose-only Responses iterations into paragraphs", async () => {
+  await withServer(
+    [
+      "I agree.",
+      '```tools\n{"name":"chatworks","input":{"conclusion":"OK."}}\n```',
+    ],
+    async (url) => {
+      const response = await fetch(`${url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "chatworks-classic",
+          input: "Continue.",
+          stream: true,
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      const body = await response.text();
+      const deltas = body
+        .split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice("data: ".length)))
+        .filter((event) => event.type === "response.output_text.delta")
+        .map((event) => event.delta);
+      assert.equal(deltas.join(""), "I agree.\n\nOK.");
     },
   );
 });

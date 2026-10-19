@@ -176,7 +176,7 @@ export async function completeDecodedProviderRequest(
     );
 
     if (result.kind === "text" && result.text) {
-      onIntermediate?.(result.text);
+      onIntermediate?.(`${result.text}\n\n`);
     }
 
     if (result.kind === "text") {
