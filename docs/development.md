@@ -1,5 +1,14 @@
 # Development and internals
 
+## Clean checkout
+
+```sh
+npm ci
+npm run check
+```
+
+`npm run check` is the complete local gate. It checks formatting, type-checks TypeScript, runs the TypeScript and Swift tests, and builds the native bridge.
+
 ## Development commands
 
 - `npm start`: build the Swift Accessibility bridge and run the TypeScript CLI.
@@ -23,6 +32,15 @@ Both ChatGPT applications are supported:
 
 Structured assistant observations are read through Accessibility message parts. Classic uses its dedicated Accessibility reader; the current app uses the shared message-structure reader. UI focus, keyboard input, and pointer movement are compatibility fallbacks governed by the selected interaction policy.
 
+## Safety invariants
+
+- Read-only observation must not activate ChatGPT or move focus or the pointer.
+- Synthetic keyboard or pointer input is allowed only by the selected interaction policy and only after the selected application is verified frontmost.
+- AX action success is not semantic success. Staging and submission require an observed composer or conversation transition.
+- A submission failure may follow a partial UI mutation, so mutating operations are not retried automatically.
+- Pending output is persisted before submission so recovery never needs to repeat arbitrary executed code.
+- TypeScript owns workflow and policy. Add Swift only when a macOS API requires it.
+
 ## Direct bridge CLI
 
 The lower-level bridge syntax is:
@@ -43,6 +61,8 @@ Direct commands are `read`, `message-parts`, `assistant-observation`, `assistant
 - `.chatworks-runtime/watch-transaction.json`: durable watch transaction.
 - `.chatworks-runtime/watch.lock/owner.json`: production watch ownership.
 - `.chatworks/`: persistent ChatWorks data such as todo state.
+
+These paths contain local runtime state and diagnostics, are excluded from Git, and may be deleted when ChatWorks is stopped. Diagnostic logs append without rotation; use explicit `CHATWORKS_*_LOG` paths for experiments and clean them after use.
 
 Environment overrides:
 
